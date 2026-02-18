@@ -31,6 +31,7 @@ public class CybikoXtreme {
     private SpeakerOutput speaker;
     private boolean running = false;
     private boolean headless = false;
+    private Path nvramPath; // If set, save external RAM to this file on exit
 
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60; // ~16.67ms
 
@@ -225,6 +226,18 @@ public class CybikoXtreme {
         running = false;
     }
 
+    /** Save external RAM to the NVRAM file. */
+    private void saveNvram() {
+        if (nvramPath == null) return;
+        try {
+            byte[] data = externalRam.getRawData();
+            Files.write(nvramPath, data);
+            System.out.printf("Saved NVRAM: %s (%d bytes)%n", nvramPath, data.length);
+        } catch (IOException e) {
+            System.err.println("Error saving NVRAM: " + e.getMessage());
+        }
+    }
+
     // --- Main entry point ---
     public static void main(String[] args) {
         if (args.length < 1) {
@@ -234,20 +247,24 @@ public class CybikoXtreme {
             System.out.println("  flash_rom.bin  - 512KB flash ROM (e.g., cyos_v1508.bin)");
             System.out.println("  --headless     - Run without GUI window");
             System.out.println("  --trace        - Enable instruction tracing");
-            System.out.println("  --app <file>   - Load .app file into RAM (MAME-style quickload)");
+            System.out.println("  --nvram <file> - Load/save NVRAM (persistent RAM with CFS filesystem)");
+            System.out.println("  --app <file>   - Add .app to NVRAM before booting (requires --nvram)");
+            System.out.println("  --list-apps    - List apps in NVRAM and exit");
             System.out.println("  --mute         - Disable audio output");
             System.exit(1);
         }
 
         CybikoXtreme emu = new CybikoXtreme();
         boolean headless = false;
-        boolean trace = false; // default off for performance
+        boolean trace = false;
         boolean mute = false;
+        boolean listApps = false;
 
         // Parse arguments
         String bootRomPath = null;
         String flashRomPath = null;
-        String appPath = null;
+        String nvramFile = null;
+        java.util.List<String> appPaths = new java.util.ArrayList<>();
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -255,7 +272,9 @@ public class CybikoXtreme {
                 case "--trace" -> trace = true;
                 case "--no-trace" -> trace = false;
                 case "--mute" -> mute = true;
-                case "--app" -> { if (i + 1 < args.length) appPath = args[++i]; }
+                case "--list-apps" -> listApps = true;
+                case "--nvram" -> { if (i + 1 < args.length) nvramFile = args[++i]; }
+                case "--app" -> { if (i + 1 < args.length) appPaths.add(args[++i]); }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
@@ -268,10 +287,77 @@ public class CybikoXtreme {
             if (flashRomPath != null) {
                 emu.loadFlashRom(Path.of(flashRomPath));
             }
-            if (appPath != null) {
-                byte[] appData = Files.readAllBytes(Path.of(appPath));
-                emu.getExternalRam().load(appData, 0);
-                System.out.printf("Loaded app: %s (%d bytes) at 0x400000%n", appPath, appData.length);
+
+            // NVRAM handling
+            if (nvramFile != null) {
+                Path nvPath = Path.of(nvramFile);
+                emu.nvramPath = nvPath;
+                CfsImage cfs;
+
+                if (Files.exists(nvPath)) {
+                    // Load existing NVRAM
+                    byte[] nvData = Files.readAllBytes(nvPath);
+                    if (CfsImage.isCfsImage(nvData)) {
+                        cfs = new CfsImage(nvData);
+                        System.out.printf("Loaded NVRAM: %s (%d bytes, CFS image)%n",
+                            nvramFile, nvData.length);
+                    } else {
+                        // Not a CFS image - create fresh and warn
+                        System.err.printf("Warning: %s is not a CFS image, creating fresh%n", nvramFile);
+                        cfs = new CfsImage();
+                    }
+                } else {
+                    // Create fresh CFS image
+                    cfs = new CfsImage();
+                    System.out.printf("Created new NVRAM: %s%n", nvramFile);
+                }
+
+                // Add any requested apps
+                for (String appPath : appPaths) {
+                    Path ap = Path.of(appPath);
+                    byte[] appData = Files.readAllBytes(ap);
+                    String appName = ap.getFileName().toString();
+                    if (CfsImage.isCfsImage(appData)) {
+                        // Already a CFS image - load directly
+                        cfs = new CfsImage(appData);
+                        System.out.printf("Loaded CFS image: %s%n", appPath);
+                    } else {
+                        // Raw .app file - wrap in CFS
+                        cfs.addFile(appName, appData);
+                    }
+                }
+
+                // List apps if requested
+                if (listApps) {
+                    var files = cfs.listFiles();
+                    System.out.println("=== Apps in NVRAM ===");
+                    if (files.isEmpty()) {
+                        System.out.println("  (none)");
+                    } else {
+                        for (String f : files) System.out.println("  " + f);
+                    }
+                    // Save any changes from --app, then exit
+                    emu.getExternalRam().load(cfs.getImageData(), 0);
+                    emu.saveNvram();
+                    System.exit(0);
+                }
+
+                // Load CFS image into external RAM
+                emu.getExternalRam().load(cfs.getImageData(), 0);
+            } else if (!appPaths.isEmpty()) {
+                // --app without --nvram: create a temporary CFS image in RAM
+                CfsImage cfs = new CfsImage();
+                for (String appPath : appPaths) {
+                    Path ap = Path.of(appPath);
+                    byte[] appData = Files.readAllBytes(ap);
+                    String appName = ap.getFileName().toString();
+                    if (CfsImage.isCfsImage(appData)) {
+                        cfs = new CfsImage(appData);
+                    } else {
+                        cfs.addFile(appName, appData);
+                    }
+                }
+                emu.getExternalRam().load(cfs.getImageData(), 0);
             }
         } catch (IOException e) {
             System.err.println("Error loading ROM/app: " + e.getMessage());
@@ -293,6 +379,11 @@ public class CybikoXtreme {
             emu.setRenderer(swing);
         } else {
             emu.setRenderer(new ConsoleRenderer());
+        }
+
+        // Save NVRAM on shutdown (JVM exit)
+        if (emu.nvramPath != null) {
+            Runtime.getRuntime().addShutdownHook(new Thread(emu::saveNvram));
         }
 
         emu.start();

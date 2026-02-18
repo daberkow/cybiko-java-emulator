@@ -8,3 +8,5 @@ build/
 src/main/resources/cybikoxt*
 
 .gradle/
+
+*.nvram

@@ -8,12 +8,46 @@ for eventual port to C.
 ```bash
 ./gradlew build
 ./gradlew run --args="path/to/cyrom150.bin path/to/cyos_v1508.bin"
-# Options:
-#   --headless   Run without GUI window
-#   --trace      Enable instruction tracing (slow, verbose)
 ```
 
+### Options
+| Flag | Description |
+|------|-------------|
+| `--headless` | Run without GUI window |
+| `--trace` | Enable instruction tracing (slow, verbose) |
+| `--mute` | Disable audio output |
+| `--nvram <file>` | Load/save persistent NVRAM (CFS filesystem + CyOS state) |
+| `--app <file.app>` | Add .app file to NVRAM before booting (multiple allowed) |
+| `--list-apps` | List apps in NVRAM and exit |
+
+### NVRAM & App Loading
+```bash
+# First run: create NVRAM and load an app
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app"
+
+# Later runs: apps, clock, and CyOS settings persist automatically
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram"
+
+# Add more apps to existing NVRAM
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app dice.app --app Calendar.app"
+
+# List what's in the NVRAM
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --list-apps"
+
+# One-off without persistence (temporary CFS image in RAM)
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --app calc.app"
+```
+
+The `--nvram` flag saves the entire 2MB external RAM on exit (via JVM shutdown hook),
+preserving CyOS state including loaded apps, clock/date, and user settings between
+sessions. If the file doesn't exist, a fresh CFS-formatted image is created.
+
+The `--app` flag wraps raw `.app` files in proper CFS (Cybiko File System) block
+format before loading into RAM. Without `--nvram`, apps are loaded into a temporary
+CFS image that is lost on exit.
+
 ROM files: `src/main/resources/cybikoxt/cyrom150.bin` and `cyos_v1508.bin` (from MAME cybikoxt.zip).
+App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice.app`).
 
 ## Hardware Reference
 
@@ -70,14 +104,16 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 | 7    | extD  | chain | /1024 | /4096  | chain  | extD  |
 
 ## Architecture
-- `CybikoXtreme` - Main emulator orchestrator with frame-based timing (60fps)
-- `AddressBus` - Memory-mapped I/O routing, DMA controller, keyboard matrix
+- `CybikoXtreme` - Main emulator orchestrator with nanoTime-based frame timing (60fps)
+- `AddressBus` - Memory-mapped I/O routing, DMA controller, keyboard matrix, speaker
 - `H8SCpu` - CPU emulation core (~150 instructions implemented)
 - `H8STimer8` - 8-bit timer with compare match and overflow interrupts
 - `H8STimer16` - 16-bit timer (TPU) with per-channel clock source tables
 - `Memory` - Simple byte-array backed memory
 - `HD66421Lcd` - LCD controller emulation
 - `PCF8593Rtc` - Real-time clock with I2C bit-bang protocol (matches MAME pcf8593.cpp)
+- `CfsImage` - CFS (Cybiko File System) image builder/reader (matches MAME cybikoxt.cpp)
+- `SpeakerOutput` - 1-bit speaker audio via javax.sound.sampled (44.1kHz, 8-bit mono)
 - `FrameBufferRenderer` / `SwingRenderer` / `ConsoleRenderer` - Display
 - `SwingRenderer` - Swing GUI with keyboard input (maps PC keys to Cybiko matrix)
 
@@ -256,10 +292,14 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 ## Current Status
 - CyOS fully boots to interactive "Congratulations!" welcome screen
 - Keyboard input works (letters, Fn+letter combos for numbers, navigation keys)
-- RTC shows correct date/time from system clock
+- RTC provides time from system clock (date display has a known bug - shows 255.18.1900)
 - LCD renders full CyOS UI with menus and text input
 - Timer8 and Timer16 interrupts drive the OS scheduler
 - DMA controller handles keyboard matrix scans
+- App loading via CFS filesystem (--app wraps .app files in proper CFS block format)
+- Persistent NVRAM (--nvram saves/restores external RAM between sessions)
+- Speaker audio output (1-bit, Port 1 bit 3 / TIOCB1)
+- Performance: disabled timer skip, cached clock divisors, conditional debug instrumentation
 - No unimplemented opcodes in the current execution path
 
 ## Keyboard Matrix
@@ -357,6 +397,43 @@ Real-time clock connected via I2C bit-bang on Port F.
 | 5   | Year(bits 7-6) + Day(bits 5-0) | BCD day, 2-bit year |
 | 6   | Weekday(bits 7-5) + Month(bits 4-0) | BCD month |
 | 7   | Timer (not used)      |             |
+
+## CFS (Cybiko File System)
+CyOS stores apps and data in a block-based filesystem (CFS) in external RAM at 0x400000.
+Format matches MAME's `src/tools/imgtool/modules/cybikoxt.cpp`.
+
+### Image Layout
+| Section | Pages | Description |
+|---------|-------|-------------|
+| Boot blocks | 0-4 (5 pages) | All 0xFF, CRC = 0xFFFF |
+| File blocks | 5-2004 (2000 pages) | App/data storage |
+| Padding | - | 7254 bytes of 0xFF |
+
+Page size: 258 bytes (2-byte CRC + 256-byte block data). Total: ~512KB.
+
+### File Block Format (256 bytes of block data)
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0 | 1 | Flags (bit 7 = BLOCK_USED) |
+| 1 | 1 | Data size in this block |
+| 2-3 | 2 | File ID (big-endian) |
+| 4-5 | 2 | Part ID (big-endian, 0 = first block) |
+| 6 | 1 | 0x20 for part 0, 0x00 for continuation |
+| 7+ | - | Filename (part 0) or file data (continuation) |
+| 74-77 | 4 | Timestamp, part 0 only (seconds since 1900/01/01) |
+| 78+ | - | File data start for part 0 |
+
+Data capacity: 178 bytes/first block, 250 bytes/continuation block.
+Unused blocks: 0xFF with bit 7 of byte[0] cleared (0x7F).
+
+### CRC16 Algorithm
+```
+val = 0; for each byte i: val = (val ^ data[i] ^ i) << 1; val |= (val >> 16) & 1
+```
+
+### Speaker
+1-bit output on Port 1 bit 3 (TIOCB1). AddressBus intercepts writes to Port 1 DR
+(0xFFFF60) and tracks the speaker level. SpeakerOutput converts to 44.1kHz PCM audio.
 
 ## Development Workflow
 1. Run emulator, find unimplemented opcode
