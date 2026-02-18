@@ -32,7 +32,7 @@ public class PCF8593Rtc {
     private Mode mode = Mode.RECV;
     private int pinScl = 1;         // SCL pin state (0/1, matches MAME)
     private int pinSda = 1;         // SDA pin state from host (0/1, matches MAME)
-    private int inp = 0;            // SDA output from RTC (0 or 1), read via sda_r()
+    private int inp = 1;            // SDA output from RTC (0=pull low, 1=release/high), read via sda_r()
     private int bits = 0;           // Bit counter within current byte
     private int pos = 0;            // Current register pointer for send
     private int dataRecvIndex = 0;  // Index into received bytes buffer
@@ -48,14 +48,14 @@ public class PCF8593Rtc {
     private int debugCount = 0;
 
     public PCF8593Rtc() {
-        // Initialize RTC registers with current system time
+        // Initialize with current system time
         LocalDateTime now = LocalDateTime.now();
-        data[0] = 0x00; // Control: counting enabled
-        data[1] = 0x00; // Hundredths
+        data[0] = 0x00;  // Control: counting enabled
+        data[1] = 0x00;  // Hundredths
         data[2] = toBcd(now.getSecond());
         data[3] = toBcd(now.getMinute());
         data[4] = toBcd(now.getHour());
-        data[5] = ((now.getYear() % 4) << 6) | toBcd(now.getDayOfMonth());
+        data[5] = (((now.getYear() % 4)) << 6) | toBcd(now.getDayOfMonth());
         data[6] = toBcd(now.getMonthValue());
         lastTickNanos = System.nanoTime();
     }
@@ -70,8 +70,8 @@ public class PCF8593Rtc {
 
     /** Advance the clock based on real elapsed time. Call periodically. */
     public void tick() {
-        // Only advance if counting is enabled (bit 1 of control = stop counting)
-        if ((data[0] & 0x02) != 0) return;
+        // Only advance if counting is enabled (bit 7 of control = 0)
+        if ((data[0] & 0x80) != 0) return;
 
         long now = System.nanoTime();
         nanosAccum += now - lastTickNanos;
@@ -122,20 +122,19 @@ public class PCF8593Rtc {
         if (active && pinScl == 0 && state != 0) {
             switch (mode) {
                 case RECV -> {
+                    // Release SDA at start of each new byte (was low for ACK)
+                    if (bits == 0) {
+                        inp = 1;
+                    }
                     // HOST -> RTC: clock in a bit
-                    if (bits < 8) {
-                        // Data bits 0-7: sample SDA
-                        if (pinSda != 0) {
-                            dataRecv[dataRecvIndex] |= (0x80 >> bits);
-                        }
-                        inp = 1; // Release SDA during data phase
-                    } else {
-                        // Bit 8 = ACK: RTC asserts SDA LOW to acknowledge
-                        inp = 0; // ACK
+                    if (pinSda != 0) {
+                        dataRecv[dataRecvIndex] |= (0x80 >> bits);
                     }
                     bits++;
-                    // After 8 data bits + 1 ACK = 9 edges
+                    // After 8 data bits + 1 ACK = bit 9
                     if (bits > 8) {
+                        // ACK: pull SDA low to acknowledge the received byte
+                        inp = 0;
                         int received = dataRecv[dataRecvIndex] & 0xFF;
                         if (debugCount < 30) {
                             System.err.printf("[I2C] Received byte 0x%02X (idx=%d)%n", received, dataRecvIndex);
@@ -179,6 +178,7 @@ public class PCF8593Rtc {
                         if (pinSda != 0) {
                             // Master NACK = end of read
                             mode = Mode.RECV;
+                            inp = 1; // Release SDA
                             clearBufferRx();
                         }
                         bits = 0;
@@ -198,7 +198,7 @@ public class PCF8593Rtc {
         if (pinScl != 0) {
             // START: SDA high -> low while SCL high
             if (state == 0 && pinSda != 0) {
-                if (debugCount++ < 100) {
+                if (debugCount++ < 30) {
                     System.err.println("[I2C] START condition");
                 }
                 active = true;
@@ -208,10 +208,11 @@ public class PCF8593Rtc {
             }
             // STOP: SDA low -> high while SCL high
             if (state != 0 && pinSda == 0) {
-                if (debugCount++ < 100) {
+                if (debugCount++ < 30) {
                     System.err.println("[I2C] STOP condition");
                 }
                 active = false;
+                inp = 1; // Release SDA on stop
             }
         }
         pinSda = state;

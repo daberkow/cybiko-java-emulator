@@ -73,6 +73,10 @@ public class AddressBus {
     private final int[] dmaRegs = new int[32]; // 0xFFFEE0-0xFFFFFF (channel regs)
     private final int[] dmaCtrl = new int[8];  // 0xFFFF00-0xFFFF07 (control regs)
 
+    // CPU reference for debug logging
+    private H8SCpu cpu;
+    public void setCpu(H8SCpu cpu) { this.cpu = cpu; }
+
     public void setBootRom(Memory bootRom) { this.bootRom = bootRom; }
     public void setExternalRam(Memory externalRam) { this.externalRam = externalRam; }
     public void setFlashRom(Memory flashRom) { this.flashRom = flashRom; }
@@ -105,7 +109,7 @@ public class AddressBus {
                 yield (address & 1) == 0 ? (kbVal >> 8) & 0xFF : kbVal & 0xFF;
             }
             case ON_CHIP -> readOnChip8(address);
-            case UNMAPPED -> { logUnmapped("read8", address); yield 0xFF; }
+            case UNMAPPED -> { logUnmapped("read8", address); yield 0; }
         };
     }
 
@@ -119,7 +123,7 @@ public class AddressBus {
             case FLASH -> flashRom.read16((address - 0x600000) & 0x7FFFF);
             case KEYBOARD -> readKeyboard(address);
             case ON_CHIP -> readOnChip16(address);
-            case UNMAPPED -> { logUnmapped("read16", address); yield 0xFFFF; }
+            case UNMAPPED -> { logUnmapped("read16", address); yield 0; }
         };
     }
 
@@ -165,7 +169,6 @@ public class AddressBus {
     // Channel registers: base + 0x00=MARAH, +0x02=MARAL, +0x04=IOARA, +0x06=ETCRA,
     //                    +0x08=MARBH, +0x0A=MARBL, +0x0C=IOARB, +0x0E=ETCRB
     // DMACR1 (0xFFFF04-05): bit 15 = 16-bit mode
-
     private void executeDmaTransfer(int channel) {
         int base = channel * 16; // Channel 0: offset 0, Channel 1: offset 16
         // Read source address (MAR_A: 32-bit from MARAH:MARAL)
@@ -184,7 +187,22 @@ public class AddressBus {
 
         srcAddr &= 0xFFFFFF;
         dstAddr &= 0xFFFFFF;
-        if (count == 0) count = 0x10000; // 0 means 65536
+
+        // Count of 0 means no transfer per MAME h8_dma.cpp (etcra != 0 check)
+        // Clear DTE bits so polling loops see transfer as "done"
+        if (count == 0) {
+            if (channel == 1) {
+                dmaCtrl[7] &= ~0xC0;
+            } else {
+                dmaCtrl[7] &= ~0x30;
+            }
+            return;
+        }
+        if (dmaDebugLog < 50) {
+            System.err.printf("[DMA] ch%d: src=0x%06X dst=0x%06X count=%d mode16=%b PC=0x%06X%n",
+                channel, srcAddr, dstAddr, count, mode16, cpu != null ? cpu.getLastStartPC() : -1);
+            dmaDebugLog++;
+        }
 
         // Perform the transfer
         if (mode16) {
@@ -203,14 +221,15 @@ public class AddressBus {
             }
         }
 
-        // Clear the enable/busy bit after transfer completes
-        // DMABCR (0xFFFF07): clear the channel's enable bit
+        // Clear the DTE bits after transfer completes (matching MAME channel_done)
+        // MAME: m_dmabcr &= ~(0x0010 << id)  where id is the state id
+        // Channel 0: clear DTE0A (bit 4) and DTE0B (bit 5)
+        // Channel 1: clear DTE1A (bit 6) and DTE1B (bit 7)
         if (channel == 1) {
-            dmaCtrl[7] &= ~0x40; // Clear bit 6 (DEA1/DTE1)
+            dmaCtrl[7] &= ~0xC0; // Clear bits 6-7 (DTE1A/DTE1B)
         } else {
-            dmaCtrl[7] &= ~0x04; // Clear bit 2 (DEA0/DTE0)
+            dmaCtrl[7] &= ~0x30; // Clear bits 4-5 (DTE0A/DTE0B)
         }
-
         // Clear transfer count
         dmaRegs[base + 6] = 0;
         dmaRegs[base + 7] = 0;
@@ -331,40 +350,23 @@ public class AddressBus {
     }
 
     // --- Timer8 routing (two channels, interleaved registers) ---
-    // Bus offsets: TCR(0,1), TCSR(2,3), TCORA(4)/TCORB(5)=ch0, TCORA(6)/TCORB(7)=ch1, TCNT(8,9)
+    // From MAME h8s2319.cpp: registers are interleaved by channel (even=ch0, odd=ch1)
+    // Bus offsets: TCR(0=ch0,1=ch1), TCSR(2=ch0,3=ch1),
+    //              TCORA(4=ch0,5=ch1), TCORB(6=ch0,7=ch1), TCNT(8=ch0,9=ch1)
     // Internal H8STimer8 offsets: TCR=0, TCSR=2, TCORA=4, TCORB=6, TCNT=8
 
     private int readTimer8(int busOff) {
-        if (busOff <= 3) {
-            // TCR (0,1) and TCSR (2,3): even=ch0, odd=ch1
-            H8STimer8 ch = (busOff % 2 == 0) ? timer8_0 : timer8_1;
-            int regOff = busOff & ~1; // 0→0(TCR), 2→2(TCSR)
-            return ch != null ? ch.read(regOff) : 0;
-        } else if (busOff <= 7) {
-            // TCOR: 4,5=ch0(TCORA,TCORB), 6,7=ch1(TCORA,TCORB)
-            H8STimer8 ch = (busOff < 6) ? timer8_0 : timer8_1;
-            int regOff = (busOff % 2 == 0) ? 4 : 6; // TCORA or TCORB
-            return ch != null ? ch.read(regOff) : 0;
-        } else {
-            // TCNT: 8=ch0, 9=ch1
-            H8STimer8 ch = (busOff == 8) ? timer8_0 : timer8_1;
-            return ch != null ? ch.read(8) : 0;
-        }
+        H8STimer8 ch = (busOff % 2 == 0) ? timer8_0 : timer8_1;
+        // Map bus offset to internal register offset:
+        // 0,1→TCR(0), 2,3→TCSR(2), 4,5→TCORA(4), 6,7→TCORB(6), 8,9→TCNT(8)
+        int regOff = (busOff & ~1); // strip channel bit to get register pair base
+        return ch != null ? ch.read(regOff) : 0;
     }
 
     private void writeTimer8(int busOff, int value) {
-        if (busOff <= 3) {
-            H8STimer8 ch = (busOff % 2 == 0) ? timer8_0 : timer8_1;
-            int regOff = busOff & ~1;
-            if (ch != null) ch.write(regOff, value);
-        } else if (busOff <= 7) {
-            H8STimer8 ch = (busOff < 6) ? timer8_0 : timer8_1;
-            int regOff = (busOff % 2 == 0) ? 4 : 6;
-            if (ch != null) ch.write(regOff, value);
-        } else {
-            H8STimer8 ch = (busOff == 8) ? timer8_0 : timer8_1;
-            if (ch != null) ch.write(8, value);
-        }
+        H8STimer8 ch = (busOff % 2 == 0) ? timer8_0 : timer8_1;
+        int regOff = (busOff & ~1);
+        if (ch != null) ch.write(regOff, value);
     }
 
     private int readOnChip8(int address) {
@@ -458,6 +460,15 @@ public class AddressBus {
         }
 
         // Default: on-chip RAM backing
+        // Debug: log I/O register reads that fall through to RAM (potential missing handlers)
+        if (address >= 0xFFFE00 && ioFallthroughLog < 200) {
+            int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+            if (pc >= 0x400000) { // Only log CyOS accesses
+                int val = onChipRam.read8(address - 0xFFDC00);
+                System.err.printf("[IO-FALL] read8 0x%06X=0x%02X PC=0x%06X%n", address, val, pc);
+                ioFallthroughLog++;
+            }
+        }
         return onChipRam.read8(address - 0xFFDC00);
     }
 
@@ -530,28 +541,17 @@ public class AddressBus {
         }
 
         // Port DDR registers (0xFFFEB0-0xFFFEBF) - store in RAM
-        // Port F DDR at 0xFFFEBE - I2C RTC SDA is driven via DDR bit 6
-        // On H8S, DDR=1 means output (drives pin to DR value), DDR=0 means input (pin released/HIGH)
-        // The old MAME code (cybiko_m.cpp) had SDA connected to PFDDR, not PFDR.
-        // CyOS controls SDA by toggling DDR: DDR bit6=1 → output LOW (SDA asserted),
-        // DDR bit6=0 → input/released (SDA HIGH via pull-up)
+        // Port F DDR at 0xFFFEBE - just store it
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
-            if (address == 0xFFFEBE) {
-                // Port F DDR write - SDA is controlled via DDR bit 6
-                // DDR bit6=1 (output mode) → SDA driven LOW (inverted: output=1 means assert/LOW)
-                // DDR bit6=0 (input mode) → SDA released HIGH
-                rtc.sda_w((value & 0x40) == 0); // same inversion as DR: bit6=0 → SDA HIGH
-            }
             onChipRam.write8(address - 0xFFDC00, value);
             return;
         }
 
         // Port F write (0xFFFF6E) - I2C RTC bit-banging
-        // SCL is driven by Port F DR bit 1 (per MAME: PFDR → scl_w)
-        // SDA is driven by Port F DDR bit 6 (per MAME: PFDDR → sda_w) — handled above
+        // Bit 1 (0x02) = SCL, Bit 6 (0x40) = SDA (inverted: 0=release/high, 1=pull low)
         if (address == 0xFFFF6E) {
             rtc.scl_w((value & 0x02) != 0);
-            // Do NOT call sda_w here — SDA is controlled via DDR (0xFFFEBE), not DR
+            rtc.sda_w((value & 0x40) == 0); // Inverted: write 0x40 = SDA low, write 0x00 = SDA high
             onChipRam.write8(address - 0xFFDC00, value);
             return;
         }
@@ -574,20 +574,33 @@ public class AddressBus {
             int oldVal = dmaCtrl[idx];
             dmaCtrl[idx] = value & 0xFF;
             // Check if DMA transfer should be triggered
-            // DMABCR low byte (0xFFFF07): bit 6 set = start transfer for channel 1
-            if (idx == 7 && (value & 0x40) != 0 && (oldVal & 0x40) == 0) {
-                executeDmaTransfer(1);
+            // DMABCR low byte (0xFFFF07) DTE bits (from MAME h8_dma.cpp):
+            //   bit 4 = DTE0A (channel 0 subchannel A)
+            //   bit 5 = DTE0B (channel 0 subchannel B)
+            //   bit 6 = DTE1A (channel 1 subchannel A)
+            //   bit 7 = DTE1B (channel 1 subchannel B)
+            if (idx == 7) {
+                // Each channel has two DTE subchannels (A/B). Only trigger once
+                // per channel per write (matching MAME's ACTIVE flag behavior).
+                // Channel 0: trigger on DTE0A (bit 4) or DTE0B (bit 5) rising edge
+                boolean ch0Triggered = false;
+                if ((value & 0x10) != 0 && (oldVal & 0x10) == 0) {
+                    executeDmaTransfer(0);
+                    ch0Triggered = true;
+                }
+                if (!ch0Triggered && (value & 0x20) != 0 && (oldVal & 0x20) == 0) {
+                    executeDmaTransfer(0);
+                }
+                // Channel 1: trigger on DTE1A (bit 6) or DTE1B (bit 7) rising edge
+                boolean ch1Triggered = false;
+                if ((value & 0x40) != 0 && (oldVal & 0x40) == 0) {
+                    executeDmaTransfer(1);
+                    ch1Triggered = true;
+                }
+                if (!ch1Triggered && (value & 0x80) != 0 && (oldVal & 0x80) == 0) {
+                    executeDmaTransfer(1);
+                }
             }
-            // DMABCR low byte: bit 2 = DEA0 for channel 0
-            if (idx == 7 && (value & 0x04) != 0 && (oldVal & 0x04) == 0) {
-                executeDmaTransfer(0);
-            }
-            return;
-        }
-
-        // IPR - Interrupt Priority Registers (0xFFFEC4-0xFFFECE)
-        if (address >= 0xFFFEC4 && address <= 0xFFFECE) {
-            onChipRam.write8(address - 0xFFDC00, value);
             return;
         }
 
@@ -653,7 +666,17 @@ public class AddressBus {
         return s;
     }
 
+    private int unmappedLogCount = 0;
+    private int ioFallthroughLog = 0;
+    private int dmaDebugLog = 0;
     private void logUnmapped(String op, int address) {
-        System.err.printf("Bus: unmapped %s at 0x%06X%n", op, address);
+        if (unmappedLogCount < 200) {
+            int pc = (cpu != null) ? cpu.getPC() : -1;
+            System.err.printf("Bus: unmapped %s at 0x%06X (PC=0x%06X)%n", op, address, pc);
+            unmappedLogCount++;
+            if (unmappedLogCount == 200) {
+                System.err.println("Bus: suppressing further unmapped warnings (200 reached)");
+            }
+        }
     }
 }

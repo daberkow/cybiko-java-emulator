@@ -47,6 +47,7 @@ public class CybikoXtreme {
         bus.setLcd(lcd);
 
         cpu = new H8SCpu(bus);
+        bus.setCpu(cpu);
 
         // Create timer peripherals
         timer8_0 = new H8STimer8(0, cpu);
@@ -115,7 +116,7 @@ public class CybikoXtreme {
     private void run() {
         int frameCounter = 0;
         long totalSteps = 0;
-        long maxSteps = 5_000_000_000L; // 5 billion steps (~4.5 min of real-time at 18MHz)
+        long maxSteps = 1_000_000_000L; // ~54 seconds of emulated time at 18MHz
 
         System.err.println("=== Starting execution ===");
 
@@ -132,6 +133,7 @@ public class CybikoXtreme {
                 cpu.step(); // step() handles halt state and interrupt wake-up
                 totalSteps++;
 
+
                 if (totalSteps >= maxSteps) break;
             }
 
@@ -143,18 +145,36 @@ public class CybikoXtreme {
             // Tick the RTC once per frame
             bus.tickRtc();
 
-            frameCounter++;
-            // Periodic status (every ~5 seconds at 60fps)
-            if (frameCounter % 300 == 0) {
-                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b%n",
-                    frameCounter, totalSteps, cpu.getPC(), cpu.isHalted());
+            // Print serial output from boot loader / CyOS
+            for (int sci = 0; sci < 3; sci++) {
+                String s = bus.drainSerialOutput(sci);
+                if (!s.isEmpty()) {
+                    System.err.printf("[SCI%d] %s%n", sci, s);
+                }
             }
+
+            frameCounter++;
+
+            // Periodic status (every ~1 second at 60fps)
+            if (frameCounter % 60 == 0) {
+                int isrCb = bus.read32(0xFFECA8);
+                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b CCR=0x%02X pending=%d isr=0x%06X t8_0[tcr=%02X cnt=%02X cora=%02X irqs=%d] t8_1[tcr=%02X cnt=%02X cora=%02X irqs=%d]%n",
+                    frameCounter, totalSteps, cpu.getPC(), cpu.isHalted(),
+                    cpu.getCCR(), cpu.getPendingInterruptCount(), isrCb,
+                    timer8_0.getTcr(), timer8_0.getTcnt(), timer8_0.getTcora(), timer8_0.getInterruptCount(),
+                    timer8_1.getTcr(), timer8_1.getTcnt(), timer8_1.getTcora(), timer8_1.getInterruptCount());
+                if (frameCounter <= 300) {
+                    System.err.printf("  t8_0 breakdown: %s%n", timer8_0.getIrqBreakdown());
+                }
+            }
+
             // Basic frame rate limiting (if we have a display)
             if (!headless && renderer != null) {
                 try { Thread.sleep(16); } catch (InterruptedException e) { break; }
             }
         }
 
+        cpu.dumpProfile();
         System.out.println("\n=== Execution stopped ===");
         System.out.printf("Total steps: %d, frames: %d%n", totalSteps, frameCounter);
         if (cpu.isHalted()) System.out.println("Reason: CPU halted");

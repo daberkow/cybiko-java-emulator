@@ -233,6 +233,26 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   MSB-first bit operations matching MAME (`0x80 >> bits` for receive, `data[pos] >> (7-bits)`
   for send). Initializes with system time via `LocalDateTime.now()`.
 
+### 9. RTC SDA idle state broke CyOS boot (CRITICAL)
+- **Symptom**: CyOS got stuck at boot splash (PC=0x4A3C40, halted=true), never
+  reached the Congratulations welcome screen. No I2C transactions attempted.
+- **Root cause**: During the RTC rewrite (bug #8), the SDA output (`inp`) was
+  initialized to 0 (SDA low). The old code had `sdaOut = true` (SDA high/released).
+  In I2C, idle SDA must be HIGH (open-drain with pull-up). With `inp=0`, Port F
+  reads (0xFFFF5E/0xFFFF6E) returned 0x00 instead of 0x40 for bit 6. CyOS reads
+  Port F during early init and the wrong value sent it down a different code path
+  where it never progressed past the boot splash.
+- **Fix**: Three changes to PCF8593Rtc.java:
+  1. Initialize `inp = 1` (SDA released/high when idle, matching I2C spec)
+  2. Set `inp = 0` in RECV mode after processing byte (ACK = pull SDA low)
+  3. Set `inp = 1` to release SDA: at start of each new RECV byte, on STOP
+     condition, and on master NACK in SEND mode
+- **Lesson**: Peripheral idle/default states matter! CyOS checks port pin states
+  during early init, even for peripherals it hasn't communicated with yet. Always
+  match the real hardware's electrical idle state (I2C: SDA and SCL both high).
+  MAME itself has `m_inp = 0` with a FIXME comment saying "sda should default 1
+  not 0" - our old working code got this right with `sdaOut = true`.
+
 ## Current Status
 - CyOS fully boots to interactive "Congratulations!" welcome screen
 - Keyboard input works (letters, Fn+letter combos for numbers, navigation keys)
@@ -243,9 +263,12 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - No unimplemented opcodes in the current execution path
 
 ## Keyboard Matrix
-The Cybiko Xtreme keyboard is a 15-column matrix at 0xE00000-0xEFFFFF. Each column is
-addressed by setting a single bit in the upper address byte. CyOS scans via DMA from
-these addresses to on-chip RAM.
+The Cybiko Xtreme keyboard is a 15-column matrix at 0xE00000-0xEFFFFF.
+Column selection is **active-LOW** (confirmed from MAME `cybiko_m.cpp`):
+`!BIT(offset, i)` means column i is selected when bit i of the word offset is 0.
+CyOS uses a walking-zero scan pattern via DMA - each read address has all bits set
+except one, isolating a single column. The SwingRenderer column indices (0-14) map
+directly to MAME's `m_key[0]`-`m_key[14]` input ports.
 
 ### Column Addressing
 | Column | Address    | Keys (bit positions in 16-bit read) |
@@ -309,8 +332,11 @@ Real-time clock connected via I2C bit-bang on Port F.
 
 ### Port F Pin Wiring
 - SCL: Port F bit 1 (directly driven by CPU)
-- SDA: Port F bit 6 (**inverted** - CPU writes 1 → SDA low, writes 0 → SDA high)
-- SDA readback: Port F input register (0xFFFF5E) bit 6, also inverted
+- SDA write: Port F bit 6 (**inverted** - CPU writes 1 → SDA low, writes 0 → SDA high)
+- SDA readback: Port F input register (0xFFFF5E) bit 6, **NOT inverted**
+  (RTC SDA high → bit 6 = 1 = 0x40, RTC SDA low → bit 6 = 0 = 0x00)
+- Note: MAME has `m_inp = 0` default with FIXME "sda should default 1 not 0".
+  Our `inp` must be 1 (idle high) or CyOS fails to boot (see bug #9).
 
 ### I2C Protocol (matching MAME pcf8593.cpp)
 - Address byte: 0xA2 (write) / 0xA3 (read)

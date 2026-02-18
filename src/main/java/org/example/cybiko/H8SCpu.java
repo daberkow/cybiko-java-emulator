@@ -19,6 +19,7 @@ public class H8SCpu {
     // --- Registers ---
     private final int[] er = new int[8]; // ER0-ER7 (32-bit)
     private int pc;                       // 24-bit program counter
+    private int lastStartPC;               // PC of the instruction currently executing
     private int ccr;                      // condition code register
     private int exr;                      // extended control register
 
@@ -39,6 +40,16 @@ public class H8SCpu {
     private boolean halted = false;
     private boolean tracing = false;
     private long cycleCount = 0;
+    private boolean pcTrapFired = false;
+    private boolean loopTraced = false;
+    // PC profiler: sample PC every N steps and track hotspots
+    private final java.util.Map<Integer,Integer> pcHistogram = new java.util.HashMap<>();
+    private long sampleCounter = 0;
+    private boolean profileDumped = false;
+    // Ring buffer of recent PCs for debugging
+    private final int[] pcHistory = new int[64];
+    private final int[] opHistory = new int[64];
+    private int pcHistoryIdx = 0;
     // --- Interrupt support ---
     // Pending interrupt vectors (priority queue, lower vector = higher priority)
     private final java.util.TreeSet<Integer> pendingInterrupts = new java.util.TreeSet<>();
@@ -95,8 +106,25 @@ public class H8SCpu {
     }
 
     public int getPC() { return pc; }
+    public int getLastStartPC() { return lastStartPC; }
+    public void dumpProfile() {
+        if (profileDumped || pcHistogram.isEmpty()) return;
+        profileDumped = true;
+        System.err.println("\n=== PC Profile (top 30 hotspots) ===");
+        pcHistogram.entrySet().stream()
+            .sorted((a,b) -> b.getValue() - a.getValue())
+            .limit(30)
+            .forEach(e -> {
+                int addr = e.getKey();
+                int count = e.getValue();
+                // Read the opcode at that address for context
+                int opcode = (bus.read8(addr) << 8) | bus.read8(addr + 1);
+                System.err.printf("  0x%06X: %6d samples (op=%04X)%n", addr, count, opcode);
+            });
+    }
     public int getCCR() { return ccr; }
     public int getSP() { return er[7]; }
+    public int getPendingInterruptCount() { return pendingInterrupts.size(); }
 
     // --- CCR flag helpers ---
     private boolean getFlag(int bit) { return (ccr & (1 << bit)) != 0; }
@@ -177,7 +205,7 @@ public class H8SCpu {
 
         // Jump to vector handler
         int handlerAddr = bus.read32(vector * 4) & 0xFFFFFF;
-        if (tracing) System.err.printf("[IRQ] Vec %d -> 0x%06X (from PC=0x%06X, SP=0x%06X, CCR=0x%02X)%n", vector, handlerAddr, pc, er[7], ccr & 0xFF);
+        if (tracing) System.err.printf("[IRQ] Vec %d -> 0x%06X (from PC=0x%06X, SP=0x%06X)%n", vector, handlerAddr, pc, er[7]);
         pc = handlerAddr;
 
         // If CPU was sleeping, wake it up
@@ -209,10 +237,17 @@ public class H8SCpu {
         }
 
         int startPC = pc;
+        lastStartPC = startPC;
         int op = fetch16();
 
         if (tracing) {
             System.err.printf("[%06X] %04X SP=%06X ", startPC, op, er[7]);
+        }
+
+        // Profile: sample every 1024 steps
+        sampleCounter++;
+        if ((sampleCounter & 0x3FF) == 0) {
+            pcHistogram.merge(startPC, 1, Integer::sum);
         }
 
         try {
@@ -220,6 +255,34 @@ public class H8SCpu {
         } catch (IllegalStateException e) {
             System.err.printf("CPU error at PC=0x%06X: %s%n", startPC, e.getMessage());
             halted = true;
+        }
+
+        // Record PC history
+        pcHistory[pcHistoryIdx] = startPC;
+        opHistory[pcHistoryIdx] = op;
+        pcHistoryIdx = (pcHistoryIdx + 1) & 63;
+
+        // Detect PC jumping to unmapped memory OR odd PC
+        if (!pcTrapFired && ((pc > 0x7FFFFF && pc < 0xFFDC00) || (pc & 1) != 0)) {
+            System.err.printf("!!! PC jumped to bad addr 0x%06X from instruction at 0x%06X (op=%04X) SP=0x%06X%n",
+                pc, startPC, op, er[7]);
+            System.err.printf("    Registers: ER0=%08X ER1=%08X ER2=%08X ER3=%08X ER4=%08X ER5=%08X ER6=%08X ER7=%08X%n",
+                er[0], er[1], er[2], er[3], er[4], er[5], er[6], er[7]);
+            // Dump PC history (most recent last)
+            System.err.println("    PC history (oldest to newest):");
+            for (int i = 0; i < 64; i++) {
+                int idx = (pcHistoryIdx + i) & 63;
+                if (pcHistory[idx] != 0 || opHistory[idx] != 0) {
+                    System.err.printf("      [%06X] %04X%n", pcHistory[idx], opHistory[idx]);
+                }
+            }
+            // Dump stack area
+            System.err.printf("    Stack top:");
+            for (int i = 0; i < 16; i++) {
+                System.err.printf(" %04X", bus.read16(er[7] + i * 2));
+            }
+            System.err.println();
+            pcTrapFired = true;
         }
 
         cycleCount++;
@@ -1326,15 +1389,13 @@ public class H8SCpu {
                         unimplemented(op, pc - 2);
                     }
                 } else if (hi == 0x57) {
-                    // TRAPA - must push same format as interrupts (CCR:16 + PC:32 = 6 bytes)
+                    // TRAPA
                     if ((lo & 0xC0) == 0x00) {
                         int vec = (lo >> 4) & 0x3;
-                        // Push PC (32-bit) then CCR (16-bit), same as interrupt processing
+                        // Push PC and CCR
                         er[7] -= 4;
-                        bus.write32(er[7], pc);
-                        er[7] -= 2;
-                        bus.write16(er[7], ccr);
-                        // Read vector from TRAPA table (vectors 4-7 at addresses 0x20-0x2F)
+                        bus.write32(er[7], (ccr << 24) | pc);
+                        // Read vector
                         pc = bus.read32(0x20 + vec * 4) & 0xFFFFFF;
                         setFlag(CCR_I, true);
                         trace("TRAPA #%d -> 0x%06X", vec, pc);
