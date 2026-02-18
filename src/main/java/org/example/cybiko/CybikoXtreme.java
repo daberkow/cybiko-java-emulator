@@ -28,8 +28,11 @@ public class CybikoXtreme {
     private final H8STimer16[] timer16 = new H8STimer16[6];
 
     private FrameBufferRenderer renderer;
+    private SpeakerOutput speaker;
     private boolean running = false;
     private boolean headless = false;
+
+    private static final long NANOS_PER_FRAME = 1_000_000_000L / 60; // ~16.67ms
 
     public CybikoXtreme() {
         bootRom = new Memory(0x8000, false);       // 32KB ROM
@@ -92,6 +95,11 @@ public class CybikoXtreme {
         this.renderer = renderer;
     }
 
+    public void setSpeaker(SpeakerOutput speaker) {
+        this.speaker = speaker;
+        bus.setSpeakerOutput(speaker);
+    }
+
     public void setHeadless(boolean headless) {
         this.headless = headless;
     }
@@ -99,6 +107,7 @@ public class CybikoXtreme {
     public H8SCpu getCpu() { return cpu; }
     public AddressBus getBus() { return bus; }
     public HD66421Lcd getLcd() { return lcd; }
+    public Memory getExternalRam() { return externalRam; }
 
     /** Initialize and start running. */
     public void start() {
@@ -119,16 +128,31 @@ public class CybikoXtreme {
         long maxSteps = 1_000_000_000L; // ~54 seconds of emulated time at 18MHz
 
         System.err.println("=== Starting execution ===");
+        long frameDeadline = System.nanoTime() + NANOS_PER_FRAME;
 
         while (running && totalSteps < maxSteps) {
             // Execute one frame's worth of cycles
             long remaining = maxSteps - totalSteps;
             int cycleBudget = (remaining > CYCLES_PER_FRAME) ? CYCLES_PER_FRAME : (int) remaining;
+            // Snapshot which timers are running to avoid method calls on stopped timers
+            boolean t8_0_run = timer8_0.isRunning();
+            boolean t8_1_run = timer8_1.isRunning();
+            boolean t16_0_run = timer16[0].isRunning();
+            boolean t16_1_run = timer16[1].isRunning();
+            boolean t16_2_run = timer16[2].isRunning();
+            boolean t16_3_run = timer16[3].isRunning();
+            boolean t16_4_run = timer16[4].isRunning();
+            boolean t16_5_run = timer16[5].isRunning();
             for (int i = 0; i < cycleBudget; i++) {
                 // Tick timers every cycle (even when CPU is halted/sleeping)
-                timer8_0.tick();
-                timer8_1.tick();
-                for (H8STimer16 t : timer16) t.tick();
+                if (t8_0_run) timer8_0.tick();
+                if (t8_1_run) timer8_1.tick();
+                if (t16_0_run) timer16[0].tick();
+                if (t16_1_run) timer16[1].tick();
+                if (t16_2_run) timer16[2].tick();
+                if (t16_3_run) timer16[3].tick();
+                if (t16_4_run) timer16[4].tick();
+                if (t16_5_run) timer16[5].tick();
 
                 cpu.step(); // step() handles halt state and interrupt wake-up
                 totalSteps++;
@@ -140,6 +164,11 @@ public class CybikoXtreme {
             // Render frame
             if (renderer != null) {
                 renderer.render(lcd.getFrameBuffer(), HD66421Lcd.WIDTH, HD66421Lcd.HEIGHT);
+            }
+
+            // Generate audio samples for this frame
+            if (speaker != null) {
+                speaker.generateSamples(CYCLES_PER_FRAME);
             }
 
             // Tick the RTC once per frame
@@ -168,12 +197,22 @@ public class CybikoXtreme {
                 }
             }
 
-            // Basic frame rate limiting (if we have a display)
+            // Precise frame rate limiting (if we have a display)
             if (!headless && renderer != null) {
-                try { Thread.sleep(16); } catch (InterruptedException e) { break; }
+                long now = System.nanoTime();
+                long sleepNanos = frameDeadline - now;
+                if (sleepNanos > 1_000_000) { // only sleep if > 1ms remaining
+                    try { Thread.sleep(sleepNanos / 1_000_000, (int)(sleepNanos % 1_000_000)); } catch (InterruptedException e) { break; }
+                }
+                frameDeadline += NANOS_PER_FRAME;
+                // If we fell behind by more than 2 frames, reset deadline to prevent catch-up spiral
+                if (frameDeadline < now - NANOS_PER_FRAME * 2) {
+                    frameDeadline = now + NANOS_PER_FRAME;
+                }
             }
         }
 
+        if (speaker != null) speaker.close();
         cpu.dumpProfile();
         System.out.println("\n=== Execution stopped ===");
         System.out.printf("Total steps: %d, frames: %d%n", totalSteps, frameCounter);
@@ -189,31 +228,37 @@ public class CybikoXtreme {
     // --- Main entry point ---
     public static void main(String[] args) {
         if (args.length < 1) {
-            System.out.println("Usage: cybiko-java <boot_rom.bin> [flash_rom.bin] [--headless] [--trace]");
+            System.out.println("Usage: cybiko-java <boot_rom.bin> [flash_rom.bin] [options]");
             System.out.println();
             System.out.println("  boot_rom.bin   - 32KB boot ROM (e.g., cyrom150.bin)");
             System.out.println("  flash_rom.bin  - 512KB flash ROM (e.g., cyos_v1508.bin)");
             System.out.println("  --headless     - Run without GUI window");
             System.out.println("  --trace        - Enable instruction tracing");
+            System.out.println("  --app <file>   - Load .app file into RAM (MAME-style quickload)");
+            System.out.println("  --mute         - Disable audio output");
             System.exit(1);
         }
 
         CybikoXtreme emu = new CybikoXtreme();
         boolean headless = false;
         boolean trace = false; // default off for performance
+        boolean mute = false;
 
         // Parse arguments
         String bootRomPath = null;
         String flashRomPath = null;
+        String appPath = null;
 
-        for (String arg : args) {
-            switch (arg) {
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
                 case "--headless" -> headless = true;
                 case "--trace" -> trace = true;
                 case "--no-trace" -> trace = false;
+                case "--mute" -> mute = true;
+                case "--app" -> { if (i + 1 < args.length) appPath = args[++i]; }
                 default -> {
-                    if (bootRomPath == null) bootRomPath = arg;
-                    else if (flashRomPath == null) flashRomPath = arg;
+                    if (bootRomPath == null) bootRomPath = args[i];
+                    else if (flashRomPath == null) flashRomPath = args[i];
                 }
             }
         }
@@ -223,13 +268,23 @@ public class CybikoXtreme {
             if (flashRomPath != null) {
                 emu.loadFlashRom(Path.of(flashRomPath));
             }
+            if (appPath != null) {
+                byte[] appData = Files.readAllBytes(Path.of(appPath));
+                emu.getExternalRam().load(appData, 0);
+                System.out.printf("Loaded app: %s (%d bytes) at 0x400000%n", appPath, appData.length);
+            }
         } catch (IOException e) {
-            System.err.println("Error loading ROM: " + e.getMessage());
+            System.err.println("Error loading ROM/app: " + e.getMessage());
             System.exit(1);
         }
 
         emu.setHeadless(headless);
         emu.getCpu().setTracing(trace);
+
+        // Set up audio
+        if (!mute) {
+            emu.setSpeaker(new SpeakerOutput());
+        }
 
         // Set up renderer
         if (!headless) {

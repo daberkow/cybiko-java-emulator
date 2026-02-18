@@ -34,6 +34,7 @@ public class H8STimer8 {
 
     // Internal state
     private int prescaleCounter = 0;
+    private int cachedDivisor = 0; // 0 = stopped
     private final H8SCpu cpu;
     private int interruptCount = 0; // Debug counter
     private int cmiaCount = 0;
@@ -85,6 +86,7 @@ public class H8STimer8 {
                     System.err.printf("[TMR%d] TCR write: 0x%02X (was 0x%02X)%n", channel, value & 0xFF, tcr);
                 }
                 tcr = value & 0xFF;
+                cachedDivisor = computeDivisor(tcr & 0x07);
             }
             case 2 -> {
                 int oldTcsr = tcsr;
@@ -119,19 +121,20 @@ public class H8STimer8 {
      * Tick the timer. Call this every N CPU cycles based on the prescaler.
      * For simplicity, we tick once per call and let the caller handle prescaling.
      */
-    public void tick() {
-        absoluteTicks++;
-        // Get prescaler from TCR bits 0-2
-        int clockSelect = tcr & 0x07;
-        if (clockSelect == 0) return; // timer stopped
-
-        // Prescale divisors: 0=stop, 1=/8, 2=/64, 3=/8192, 4-7=external/special
-        int divisor = switch (clockSelect) {
+    private static int computeDivisor(int clockSelect) {
+        return switch (clockSelect) {
+            case 0 -> 0; // stopped
             case 1 -> 8;
             case 2 -> 64;
             case 3 -> 8192;
             default -> 256; // approximate for external clock sources
         };
+    }
+
+    public void tick() {
+        absoluteTicks++;
+        int divisor = cachedDivisor;
+        if (divisor == 0) return; // timer stopped
 
         totalTicks++;
         prescaleCounter++;
@@ -202,4 +205,6 @@ public class H8STimer8 {
     public int getTcnt() { return tcnt; }
     public int getTcora() { return tcora; }
     public int getTcorb() { return tcorb; }
+    /** True when the timer's clock source is not stopped (CKS != 0). */
+    public boolean isRunning() { return (tcr & 0x07) != 0; }
 }

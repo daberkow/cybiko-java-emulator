@@ -40,6 +40,7 @@ public class H8STimer16 {
     // Internal
     private int prescaleCounter = 0;
     private boolean enabled = false; // Controlled by TSTR register
+    private int cachedDivisor = 0;   // 0 = stopped/external
     private final H8SCpu cpu;
     private final int[] clockDivisors; // per-channel clock source table
     private int interruptCount = 0; // Debug counter
@@ -109,7 +110,7 @@ public class H8STimer16 {
     /** Write 8-bit register by offset. */
     public void write8(int offset, int value) {
         switch (offset) {
-            case 0 -> tcr = value & 0xFF;
+            case 0 -> { tcr = value & 0xFF; updateCachedDivisor(); }
             case 1 -> tmdr = value & 0xFF;
             case 2 -> tior = value & 0xFF;
             case 4 -> tier = value & 0xFF;
@@ -143,20 +144,24 @@ public class H8STimer16 {
         }
     }
 
+    private void updateCachedDivisor() {
+        cachedDivisor = enabled ? clockDivisors[tcr & 0x07] : 0;
+    }
+
     /** Enable/disable this timer channel (controlled by TSTR register). */
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+        updateCachedDivisor();
     }
     public boolean isEnabled() { return enabled; }
     public int getInterruptCount() { return interruptCount; }
+    /** True when the timer is enabled and has a valid internal clock source. */
+    public boolean isRunning() { return enabled && clockDivisors[tcr & 0x07] != 0; }
 
     /** Tick the timer. Called every CPU cycle. */
     public void tick() {
-        if (!enabled) return; // Timer must be enabled via TSTR
-        int clockSelect = tcr & 0x07;
-
-        int divisor = clockDivisors[clockSelect];
-        if (divisor == 0) return; // External/chained/stopped - not ticked internally
+        int divisor = cachedDivisor;
+        if (divisor == 0) return; // Stopped, external, or disabled
 
         prescaleCounter++;
         if (prescaleCounter < divisor) return;

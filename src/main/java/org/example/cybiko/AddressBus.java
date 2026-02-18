@@ -63,6 +63,12 @@ public class AddressBus {
     // Serial output buffers (one per SCI channel)
     private final StringBuilder[] sciOutput = {new StringBuilder(), new StringBuilder(), new StringBuilder()};
 
+    // Speaker state - Port 1 bit 3 (TIOCB1) drives the speaker
+    private int speakerLevel = 0; // 0 or 1
+    private SpeakerOutput speakerOutput;
+    public void setSpeakerOutput(SpeakerOutput speaker) { this.speakerOutput = speaker; }
+    public int getSpeakerLevel() { return speakerLevel; }
+
     // ADC state
     private int adcsr = 0;   // ADC Control/Status Register (bit 7=ADF, bit 5=ADST)
     private int adcr = 0x7E; // ADC Control Register (default from manual)
@@ -543,6 +549,17 @@ public class AddressBus {
         // Port DDR registers (0xFFFEB0-0xFFFEBF) - store in RAM
         // Port F DDR at 0xFFFEBE - just store it
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
+            onChipRam.write8(address - 0xFFDC00, value);
+            return;
+        }
+
+        // Port 1 write (0xFFFF60) - bit 3 (TIOCB1) drives speaker
+        if (address == 0xFFFF60) {
+            int level = (value & 0x08) != 0 ? 1 : 0;
+            if (level != speakerLevel) {
+                speakerLevel = level;
+                if (speakerOutput != null) speakerOutput.setLevel(level);
+            }
             onChipRam.write8(address - 0xFFDC00, value);
             return;
         }

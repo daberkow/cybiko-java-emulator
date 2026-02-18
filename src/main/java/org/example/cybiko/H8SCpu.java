@@ -39,6 +39,7 @@ public class H8SCpu {
     // --- State ---
     private boolean halted = false;
     private boolean tracing = false;
+    private boolean debug = false;
     private long cycleCount = 0;
     private boolean pcTrapFired = false;
     private boolean loopTraced = false;
@@ -58,7 +59,8 @@ public class H8SCpu {
         this.bus = bus;
     }
 
-    public void setTracing(boolean tracing) { this.tracing = tracing; }
+    public void setTracing(boolean tracing) { this.tracing = tracing; if (tracing) this.debug = true; }
+    public void setDebug(boolean debug) { this.debug = debug; }
     public boolean isHalted() { return halted; }
     public long getCycleCount() { return cycleCount; }
 
@@ -244,10 +246,12 @@ public class H8SCpu {
             System.err.printf("[%06X] %04X SP=%06X ", startPC, op, er[7]);
         }
 
-        // Profile: sample every 1024 steps
-        sampleCounter++;
-        if ((sampleCounter & 0x3FF) == 0) {
-            pcHistogram.merge(startPC, 1, Integer::sum);
+        // Profile: sample every 1024 steps (only when debugging)
+        if (debug) {
+            sampleCounter++;
+            if ((sampleCounter & 0x3FF) == 0) {
+                pcHistogram.merge(startPC, 1, Integer::sum);
+            }
         }
 
         try {
@@ -257,32 +261,34 @@ public class H8SCpu {
             halted = true;
         }
 
-        // Record PC history
-        pcHistory[pcHistoryIdx] = startPC;
-        opHistory[pcHistoryIdx] = op;
-        pcHistoryIdx = (pcHistoryIdx + 1) & 63;
+        if (debug) {
+            // Record PC history
+            pcHistory[pcHistoryIdx] = startPC;
+            opHistory[pcHistoryIdx] = op;
+            pcHistoryIdx = (pcHistoryIdx + 1) & 63;
 
-        // Detect PC jumping to unmapped memory OR odd PC
-        if (!pcTrapFired && ((pc > 0x7FFFFF && pc < 0xFFDC00) || (pc & 1) != 0)) {
-            System.err.printf("!!! PC jumped to bad addr 0x%06X from instruction at 0x%06X (op=%04X) SP=0x%06X%n",
-                pc, startPC, op, er[7]);
-            System.err.printf("    Registers: ER0=%08X ER1=%08X ER2=%08X ER3=%08X ER4=%08X ER5=%08X ER6=%08X ER7=%08X%n",
-                er[0], er[1], er[2], er[3], er[4], er[5], er[6], er[7]);
-            // Dump PC history (most recent last)
-            System.err.println("    PC history (oldest to newest):");
-            for (int i = 0; i < 64; i++) {
-                int idx = (pcHistoryIdx + i) & 63;
-                if (pcHistory[idx] != 0 || opHistory[idx] != 0) {
-                    System.err.printf("      [%06X] %04X%n", pcHistory[idx], opHistory[idx]);
+            // Detect PC jumping to unmapped memory OR odd PC
+            if (!pcTrapFired && ((pc > 0x7FFFFF && pc < 0xFFDC00) || (pc & 1) != 0)) {
+                System.err.printf("!!! PC jumped to bad addr 0x%06X from instruction at 0x%06X (op=%04X) SP=0x%06X%n",
+                    pc, startPC, op, er[7]);
+                System.err.printf("    Registers: ER0=%08X ER1=%08X ER2=%08X ER3=%08X ER4=%08X ER5=%08X ER6=%08X ER7=%08X%n",
+                    er[0], er[1], er[2], er[3], er[4], er[5], er[6], er[7]);
+                // Dump PC history (most recent last)
+                System.err.println("    PC history (oldest to newest):");
+                for (int i = 0; i < 64; i++) {
+                    int idx = (pcHistoryIdx + i) & 63;
+                    if (pcHistory[idx] != 0 || opHistory[idx] != 0) {
+                        System.err.printf("      [%06X] %04X%n", pcHistory[idx], opHistory[idx]);
+                    }
                 }
+                // Dump stack area
+                System.err.printf("    Stack top:");
+                for (int i = 0; i < 16; i++) {
+                    System.err.printf(" %04X", bus.read16(er[7] + i * 2));
+                }
+                System.err.println();
+                pcTrapFired = true;
             }
-            // Dump stack area
-            System.err.printf("    Stack top:");
-            for (int i = 0; i < 16; i++) {
-                System.err.printf(" %04X", bus.read16(er[7] + i * 2));
-            }
-            System.err.println();
-            pcTrapFired = true;
         }
 
         cycleCount++;
