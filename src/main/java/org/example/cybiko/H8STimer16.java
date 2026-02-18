@@ -165,8 +165,11 @@ public class H8STimer16 {
         int prevTcnt = tcnt;
         tcnt = (tcnt + 1) & 0xFFFF;
 
+        int cmpA = tgra;
+        int cmpB = tgrb;
+
         // Compare match A
-        if (tcnt == tgra) {
+        if (tcnt == cmpA) {
             boolean wasSet = (tsr & TSR_TGFA) != 0;
             tsr |= TSR_TGFA;
             if (!wasSet && (tier & TIER_TGIEA) != 0) {
@@ -179,7 +182,7 @@ public class H8STimer16 {
         }
 
         // Compare match B
-        if (tcnt == tgrb) {
+        if (tcnt == cmpB) {
             boolean wasSet = (tsr & TSR_TGFB) != 0;
             tsr |= TSR_TGFB;
             if (!wasSet && (tier & TIER_TGIEB) != 0) {

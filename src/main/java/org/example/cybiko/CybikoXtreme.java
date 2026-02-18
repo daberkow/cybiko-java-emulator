@@ -144,13 +144,11 @@ public class CybikoXtreme {
             bus.tickRtc();
 
             frameCounter++;
-
             // Periodic status (every ~5 seconds at 60fps)
             if (frameCounter % 300 == 0) {
                 System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b%n",
                     frameCounter, totalSteps, cpu.getPC(), cpu.isHalted());
             }
-
             // Basic frame rate limiting (if we have a display)
             if (!headless && renderer != null) {
                 try { Thread.sleep(16); } catch (InterruptedException e) { break; }

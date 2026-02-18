@@ -177,7 +177,7 @@ public class H8SCpu {
 
         // Jump to vector handler
         int handlerAddr = bus.read32(vector * 4) & 0xFFFFFF;
-        if (tracing) System.err.printf("[IRQ] Vec %d -> 0x%06X (from PC=0x%06X, SP=0x%06X)%n", vector, handlerAddr, pc, er[7]);
+        if (tracing) System.err.printf("[IRQ] Vec %d -> 0x%06X (from PC=0x%06X, SP=0x%06X, CCR=0x%02X)%n", vector, handlerAddr, pc, er[7], ccr & 0xFF);
         pc = handlerAddr;
 
         // If CPU was sleeping, wake it up
@@ -1326,13 +1326,15 @@ public class H8SCpu {
                         unimplemented(op, pc - 2);
                     }
                 } else if (hi == 0x57) {
-                    // TRAPA
+                    // TRAPA - must push same format as interrupts (CCR:16 + PC:32 = 6 bytes)
                     if ((lo & 0xC0) == 0x00) {
                         int vec = (lo >> 4) & 0x3;
-                        // Push PC and CCR
+                        // Push PC (32-bit) then CCR (16-bit), same as interrupt processing
                         er[7] -= 4;
-                        bus.write32(er[7], (ccr << 24) | pc);
-                        // Read vector
+                        bus.write32(er[7], pc);
+                        er[7] -= 2;
+                        bus.write16(er[7], ccr);
+                        // Read vector from TRAPA table (vectors 4-7 at addresses 0x20-0x2F)
                         pc = bus.read32(0x20 + vec * 4) & 0xFFFFFF;
                         setFlag(CCR_I, true);
                         trace("TRAPA #%d -> 0x%06X", vec, pc);

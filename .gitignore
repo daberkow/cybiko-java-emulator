@@ -6,3 +6,5 @@ build/
 
 // Ignore CybikoXT resource files
 src/main/resources/cybikoxt*
+
+.gradle/

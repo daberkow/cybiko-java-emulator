@@ -105,7 +105,7 @@ public class AddressBus {
                 yield (address & 1) == 0 ? (kbVal >> 8) & 0xFF : kbVal & 0xFF;
             }
             case ON_CHIP -> readOnChip8(address);
-            case UNMAPPED -> { logUnmapped("read8", address); yield 0; }
+            case UNMAPPED -> { logUnmapped("read8", address); yield 0xFF; }
         };
     }
 
@@ -119,7 +119,7 @@ public class AddressBus {
             case FLASH -> flashRom.read16((address - 0x600000) & 0x7FFFF);
             case KEYBOARD -> readKeyboard(address);
             case ON_CHIP -> readOnChip16(address);
-            case UNMAPPED -> { logUnmapped("read16", address); yield 0; }
+            case UNMAPPED -> { logUnmapped("read16", address); yield 0xFFFF; }
         };
     }
 
@@ -165,6 +165,7 @@ public class AddressBus {
     // Channel registers: base + 0x00=MARAH, +0x02=MARAL, +0x04=IOARA, +0x06=ETCRA,
     //                    +0x08=MARBH, +0x0A=MARBL, +0x0C=IOARB, +0x0E=ETCRB
     // DMACR1 (0xFFFF04-05): bit 15 = 16-bit mode
+
     private void executeDmaTransfer(int channel) {
         int base = channel * 16; // Channel 0: offset 0, Channel 1: offset 16
         // Read source address (MAR_A: 32-bit from MARAH:MARAL)
@@ -529,17 +530,28 @@ public class AddressBus {
         }
 
         // Port DDR registers (0xFFFEB0-0xFFFEBF) - store in RAM
-        // Port F DDR at 0xFFFEBE - just store it
+        // Port F DDR at 0xFFFEBE - I2C RTC SDA is driven via DDR bit 6
+        // On H8S, DDR=1 means output (drives pin to DR value), DDR=0 means input (pin released/HIGH)
+        // The old MAME code (cybiko_m.cpp) had SDA connected to PFDDR, not PFDR.
+        // CyOS controls SDA by toggling DDR: DDR bit6=1 → output LOW (SDA asserted),
+        // DDR bit6=0 → input/released (SDA HIGH via pull-up)
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
+            if (address == 0xFFFEBE) {
+                // Port F DDR write - SDA is controlled via DDR bit 6
+                // DDR bit6=1 (output mode) → SDA driven LOW (inverted: output=1 means assert/LOW)
+                // DDR bit6=0 (input mode) → SDA released HIGH
+                rtc.sda_w((value & 0x40) == 0); // same inversion as DR: bit6=0 → SDA HIGH
+            }
             onChipRam.write8(address - 0xFFDC00, value);
             return;
         }
 
         // Port F write (0xFFFF6E) - I2C RTC bit-banging
-        // Bit 1 (0x02) = SCL, Bit 6 (0x40) = SDA (inverted: 0=release/high, 1=pull low)
+        // SCL is driven by Port F DR bit 1 (per MAME: PFDR → scl_w)
+        // SDA is driven by Port F DDR bit 6 (per MAME: PFDDR → sda_w) — handled above
         if (address == 0xFFFF6E) {
             rtc.scl_w((value & 0x02) != 0);
-            rtc.sda_w((value & 0x40) == 0); // Inverted: write 0x40 = SDA low, write 0x00 = SDA high
+            // Do NOT call sda_w here — SDA is controlled via DDR (0xFFFEBE), not DR
             onChipRam.write8(address - 0xFFDC00, value);
             return;
         }
@@ -570,6 +582,12 @@ public class AddressBus {
             if (idx == 7 && (value & 0x04) != 0 && (oldVal & 0x04) == 0) {
                 executeDmaTransfer(0);
             }
+            return;
+        }
+
+        // IPR - Interrupt Priority Registers (0xFFFEC4-0xFFFECE)
+        if (address >= 0xFFFEC4 && address <= 0xFFFECE) {
+            onChipRam.write8(address - 0xFFDC00, value);
             return;
         }
 

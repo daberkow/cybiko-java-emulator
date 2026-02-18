@@ -48,14 +48,14 @@ public class PCF8593Rtc {
     private int debugCount = 0;
 
     public PCF8593Rtc() {
-        // Initialize with current system time
+        // Initialize RTC registers with current system time
         LocalDateTime now = LocalDateTime.now();
-        data[0] = 0x00;  // Control: counting enabled
-        data[1] = 0x00;  // Hundredths
+        data[0] = 0x00; // Control: counting enabled
+        data[1] = 0x00; // Hundredths
         data[2] = toBcd(now.getSecond());
         data[3] = toBcd(now.getMinute());
         data[4] = toBcd(now.getHour());
-        data[5] = (((now.getYear() % 4)) << 6) | toBcd(now.getDayOfMonth());
+        data[5] = ((now.getYear() % 4) << 6) | toBcd(now.getDayOfMonth());
         data[6] = toBcd(now.getMonthValue());
         lastTickNanos = System.nanoTime();
     }
@@ -70,8 +70,8 @@ public class PCF8593Rtc {
 
     /** Advance the clock based on real elapsed time. Call periodically. */
     public void tick() {
-        // Only advance if counting is enabled (bit 7 of control = 0)
-        if ((data[0] & 0x80) != 0) return;
+        // Only advance if counting is enabled (bit 1 of control = stop counting)
+        if ((data[0] & 0x02) != 0) return;
 
         long now = System.nanoTime();
         nanosAccum += now - lastTickNanos;
@@ -123,11 +123,18 @@ public class PCF8593Rtc {
             switch (mode) {
                 case RECV -> {
                     // HOST -> RTC: clock in a bit
-                    if (pinSda != 0) {
-                        dataRecv[dataRecvIndex] |= (0x80 >> bits);
+                    if (bits < 8) {
+                        // Data bits 0-7: sample SDA
+                        if (pinSda != 0) {
+                            dataRecv[dataRecvIndex] |= (0x80 >> bits);
+                        }
+                        inp = 1; // Release SDA during data phase
+                    } else {
+                        // Bit 8 = ACK: RTC asserts SDA LOW to acknowledge
+                        inp = 0; // ACK
                     }
                     bits++;
-                    // After 8 data bits + 1 ACK = bit 9
+                    // After 8 data bits + 1 ACK = 9 edges
                     if (bits > 8) {
                         int received = dataRecv[dataRecvIndex] & 0xFF;
                         if (debugCount < 30) {
@@ -191,7 +198,7 @@ public class PCF8593Rtc {
         if (pinScl != 0) {
             // START: SDA high -> low while SCL high
             if (state == 0 && pinSda != 0) {
-                if (debugCount++ < 30) {
+                if (debugCount++ < 100) {
                     System.err.println("[I2C] START condition");
                 }
                 active = true;
@@ -201,7 +208,7 @@ public class PCF8593Rtc {
             }
             // STOP: SDA low -> high while SCL high
             if (state != 0 && pinSda == 0) {
-                if (debugCount++ < 30) {
+                if (debugCount++ < 100) {
                     System.err.println("[I2C] STOP condition");
                 }
                 active = false;
