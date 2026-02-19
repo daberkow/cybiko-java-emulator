@@ -52,8 +52,10 @@ public class H8SCpu {
     private final int[] opHistory = new int[64];
     private int pcHistoryIdx = 0;
     // --- Interrupt support ---
-    // Pending interrupt vectors (priority queue, lower vector = higher priority)
-    private final java.util.TreeSet<Integer> pendingInterrupts = new java.util.TreeSet<>();
+    // Pending interrupt vectors stored as a sorted array (lower vector = higher priority).
+    // Much faster than TreeSet for the small number of concurrent interrupts (typically 0-3).
+    private final int[] pendingIrqs = new int[32]; // max pending interrupts
+    private int pendingIrqCount = 0;
 
     public H8SCpu(AddressBus bus) {
         this.bus = bus;
@@ -126,7 +128,7 @@ public class H8SCpu {
     }
     public int getCCR() { return ccr; }
     public int getSP() { return er[7]; }
-    public int getPendingInterruptCount() { return pendingInterrupts.size(); }
+    public int getPendingInterruptCount() { return pendingIrqCount; }
 
     // --- CCR flag helpers ---
     private boolean getFlag(int bit) { return (ccr & (1 << bit)) != 0; }
@@ -183,15 +185,36 @@ public class H8SCpu {
 
     /** Request an interrupt. Will be serviced when I flag is clear. */
     public void requestInterrupt(int vector) {
-        pendingInterrupts.add(vector);
+        // Insert sorted (ascending) with dedup
+        for (int i = 0; i < pendingIrqCount; i++) {
+            if (pendingIrqs[i] == vector) return; // already pending
+            if (pendingIrqs[i] > vector) {
+                // Insert here, shift rest right
+                if (pendingIrqCount < pendingIrqs.length) {
+                    System.arraycopy(pendingIrqs, i, pendingIrqs, i + 1, pendingIrqCount - i);
+                    pendingIrqs[i] = vector;
+                    pendingIrqCount++;
+                }
+                return;
+            }
+        }
+        // Append at end (largest so far)
+        if (pendingIrqCount < pendingIrqs.length) {
+            pendingIrqs[pendingIrqCount++] = vector;
+        }
     }
 
     /** Process pending interrupts if I flag is clear. */
     private boolean processInterrupts() {
-        if (pendingInterrupts.isEmpty()) return false;
+        if (pendingIrqCount == 0) return false;
         if (getFlag(CCR_I)) return false; // interrupts masked
 
-        int vector = pendingInterrupts.pollFirst();
+        // Poll first (lowest vector = highest priority)
+        int vector = pendingIrqs[0];
+        pendingIrqCount--;
+        if (pendingIrqCount > 0) {
+            System.arraycopy(pendingIrqs, 1, pendingIrqs, 0, pendingIrqCount);
+        }
 
         // Push PC and CCR to stack (H8S pushes as: CCR(padded to 16 bits), then PC(32 bits))
         // Actually H8S/2000 pushes: first PC as 32 bits, then CCR as 16 bits (EXR too if enabled)
@@ -228,7 +251,7 @@ public class H8SCpu {
             // On real H8S, any interrupt request wakes CPU from sleep, even if masked (I=1).
             // When I=1, CPU wakes and continues from next instruction (no vectoring).
             // When I=0, processInterrupts() above already handled wake + vectoring.
-            if (!pendingInterrupts.isEmpty()) {
+            if (pendingIrqCount > 0) {
                 halted = false;
                 // Don't consume the pending interrupts - they stay pending
                 // until the software clears the I flag (e.g. via ANDC/LDC)

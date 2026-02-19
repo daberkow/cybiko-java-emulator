@@ -36,15 +36,7 @@ public class H8STimer8 {
     private int prescaleCounter = 0;
     private int cachedDivisor = 0; // 0 = stopped
     private final H8SCpu cpu;
-    private int interruptCount = 0; // Debug counter
-    private int cmiaCount = 0;
-    private int cmibCount = 0;
-    private int oviCount = 0;
-    private long totalTicks = 0;
-    private long lastIrqTick = 0;
-    private long absoluteTicks = 0; // increments on every tick() call
-    private int tcsrClearLog = 0; // debug: limit OVF clear logs
-    private int ovfSetLog = 0;    // debug: limit OVF set logs
+    private int interruptCount = 0;
 
     // TCR bits (from MAME h8_timer8.h)
     private static final int TCR_CMIEB = 0x80; // Bit 7: Compare Match Interrupt Enable B
@@ -81,39 +73,15 @@ public class H8STimer8 {
     /** Write register by offset (0-8). */
     public void write(int offset, int value) {
         switch (offset) {
-            case 0 -> {
-                if (channel == 0 && interruptCount < 10) {
-                    System.err.printf("[TMR%d] TCR write: 0x%02X (was 0x%02X)%n", channel, value & 0xFF, tcr);
-                }
-                tcr = value & 0xFF;
-                cachedDivisor = computeDivisor(tcr & 0x07);
-            }
+            case 0 -> { tcr = value & 0xFF; cachedDivisor = computeDivisor(tcr & 0x07); }
             case 2 -> {
-                int oldTcsr = tcsr;
                 // Flags (bits 7-5) only clear when written as 0; lower bits writable directly
                 tcsr = (tcsr & ~0x1F) | (value & 0x1F); // write lower 5 bits normally
                 tcsr &= value | 0x1F; // clear flag bits only where value has 0
-                // Debug: log when ch1's OVF flag is cleared
-                if (channel == 1 && (oldTcsr & TCSR_OVF) != 0 && (tcsr & TCSR_OVF) == 0 && tcsrClearLog < 20) {
-                    int spc = cpu.getLastStartPC();
-                    System.err.printf("[TMR1] OVF CLEARED! val=0x%02X old=0x%02X new=0x%02X startPC=0x%06X nextPC=0x%06X%n",
-                        value & 0xFF, oldTcsr, tcsr, spc, cpu.getPC());
-                    tcsrClearLog++;
-                }
             }
-            case 4 -> {
-                if (channel == 0 && interruptCount < 10) {
-                    System.err.printf("[TMR%d] TCORA write: 0x%02X (was 0x%02X)%n", channel, value & 0xFF, tcora);
-                }
-                tcora = value & 0xFF;
-            }
+            case 4 -> tcora = value & 0xFF;
             case 6 -> tcorb = value & 0xFF;
-            case 8 -> {
-                if (channel == 0 && interruptCount < 10) {
-                    System.err.printf("[TMR%d] TCNT write: 0x%02X (was 0x%02X)%n", channel, value & 0xFF, tcnt);
-                }
-                tcnt = value & 0xFF;
-            }
+            case 8 -> tcnt = value & 0xFF;
         }
     }
 
@@ -132,33 +100,25 @@ public class H8STimer8 {
     }
 
     public void tick() {
-        absoluteTicks++;
         int divisor = cachedDivisor;
         if (divisor == 0) return; // timer stopped
 
-        totalTicks++;
-        prescaleCounter++;
-        if (prescaleCounter < divisor) return;
+        if (++prescaleCounter < divisor) return;
         prescaleCounter = 0;
 
         // Increment counter
         tcnt = (tcnt + 1) & 0xFF;
 
-        // Check compare match A (MAME compares against tcor+1, but since we
-        // increment first, comparing against tcora is equivalent)
+        // Check compare match A
         if (tcnt == tcora) {
-            // Only fire interrupt on flag transition 0→1 (per MAME)
             if ((tcsr & TCSR_CMFA) == 0) {
                 tcsr |= TCSR_CMFA;
                 if ((tcr & TCR_CMIEA) != 0) {
                     cpu.requestInterrupt(vectorCMIA);
                     interruptCount++;
-                    cmiaCount++;
                 }
             }
-            // Clear on compare match A if configured (TCR bits 4-3)
-            int clearMode = (tcr >> 3) & 0x03;
-            if (clearMode == 1) tcnt = 0;
+            if (((tcr >> 3) & 0x03) == 1) tcnt = 0;
         }
 
         // Check compare match B
@@ -168,43 +128,26 @@ public class H8STimer8 {
                 if ((tcr & TCR_CMIEB) != 0) {
                     cpu.requestInterrupt(vectorCMIB);
                     interruptCount++;
-                    cmibCount++;
                 }
             }
-            int clearMode = (tcr >> 3) & 0x03;
-            if (clearMode == 2) tcnt = 0;
+            if (((tcr >> 3) & 0x03) == 2) tcnt = 0;
         }
 
         // Check overflow (only on natural wrap 0xFF→0x00)
-        if (tcnt == 0) {
-            if (channel == 1 && ovfSetLog < 30) {
-                boolean wasSet = (tcsr & TCSR_OVF) != 0;
-                System.err.printf("[TMR1] tcnt=0 OVF_was=%s tcsr=0x%02X absTicks=%d%n",
-                    wasSet ? "SET" : "CLR", tcsr, absoluteTicks);
-                ovfSetLog++;
-            }
-            if ((tcsr & TCSR_OVF) == 0) {
-                tcsr |= TCSR_OVF;
-                if ((tcr & TCR_OVIE) != 0) {
-                    cpu.requestInterrupt(vectorOVI);
-                    interruptCount++;
-                    oviCount++;
-                    if (oviCount <= 5) {
-                        System.err.printf("[TMR%d] OVI #%d: totalTicks=%d ticksSinceLast=%d tcr=0x%02X divisor=%d%n",
-                            channel, interruptCount, totalTicks, totalTicks - lastIrqTick, tcr, divisor);
-                    }
-                    lastIrqTick = totalTicks;
-                }
+        if (tcnt == 0 && (tcsr & TCSR_OVF) == 0) {
+            tcsr |= TCSR_OVF;
+            if ((tcr & TCR_OVIE) != 0) {
+                cpu.requestInterrupt(vectorOVI);
+                interruptCount++;
             }
         }
     }
 
     public int getInterruptCount() { return interruptCount; }
-    public String getIrqBreakdown() { return "cmia=" + cmiaCount + " cmib=" + cmibCount + " ovi=" + oviCount + " absTicks=" + absoluteTicks + " runTicks=" + totalTicks; }
     public int getTcr() { return tcr; }
     public int getTcnt() { return tcnt; }
     public int getTcora() { return tcora; }
     public int getTcorb() { return tcorb; }
     /** True when the timer's clock source is not stopped (CKS != 0). */
-    public boolean isRunning() { return (tcr & 0x07) != 0; }
+    public boolean isRunning() { return cachedDivisor != 0; }
 }

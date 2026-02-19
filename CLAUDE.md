@@ -202,11 +202,12 @@ Use these hashes to identify boot progress in headless testing.
 | 1 | ~1-60 | 65232E60 | Boot ROM: "Cybiko" logo top third | 0x0076B2 (boot ROM) |
 | 2 | ~60-240 | AA3312CC | "Cybiko" + "Loading CyOS 1.5.08" | 0x4A3C40 (halted) |
 | 3 | ~240-300 | C0DBEF72 | Animated Cybiko logo (CyOS init) | 0x488900 / 0x003AD8 |
-| 4 | ~360+ | FAEDD600 | Welcome screen / desktop (no NVRAM) | 0x4A3C40 (halted, waiting for input) |
+| 4a | ~360+ | FAEDD600 | "Congratulations" welcome (no NVRAM) | 0x4A3C40 (halted) |
+| 4b | ~360+ | 6C55765A | Home screen with clock (NVRAM, colon shown) | 0x4A3C40 (halted) |
+| 4b | ~360+ | B5EB2FA8 | Home screen with clock (NVRAM, colon hidden/blink) | 0x4A3C40 (halted) |
 
-Phase 4 hash will differ with NVRAM (desktop vs welcome screen). Hashes may vary
-if LCD palette or contrast settings change. The user should confirm these hashes
-match what they see on the GUI display.
+Phase 4 hash differs based on NVRAM state. The home screen (4b) alternates between
+two hashes as the clock colon blinks. All hashes confirmed by user on GUI display.
 
 ## Bugs Found & Fixed
 

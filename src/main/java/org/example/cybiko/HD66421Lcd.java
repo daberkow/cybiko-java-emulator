@@ -62,6 +62,7 @@ public class HD66421Lcd {
 
     private final int[] regs = new int[32]; // registers (indexed 0-31 by regIndex)
     private final byte[] vram = new byte[VRAM_SIZE];
+    private final int[] frameBuffer = new int[WIDTH * HEIGHT]; // reused every frame
     private int regIndex;      // currently selected register
     private int xAddr, yAddr;  // current X/Y position
 
@@ -134,46 +135,43 @@ public class HD66421Lcd {
 
     /**
      * Extract the frame buffer as a 160x100 int array of grayscale values (0-255).
+     * Returns a reused internal array - caller must not hold a reference across frames.
      * Drawing order matches MAME: bottom-to-top, left-to-right.
      * VRAM byte 0 maps to screen row 99 (bottom), last byte to row 0 (top).
      */
     public int[] getFrameBuffer() {
-        int[] pixels = new int[WIDTH * HEIGHT];
-
         if (!isDisplayOn()) {
-            // Display off - all white
-            for (int i = 0; i < pixels.length; i++) pixels[i] = 255;
-            return pixels;
+            java.util.Arrays.fill(frameBuffer, 255);
+            return frameBuffer;
         }
 
         // Compute palette: 4 grayscale levels mapped to 0-255
-        int[] palette = new int[4];
-        for (int i = 0; i < 4; i++) {
-            int colorReg = regs[REG_PALETTE1 + i];
-            int contrast = regs[REG_CONTRAST];
-            int bright = 31 - (colorReg - contrast + 3);
-            bright = Math.max(0, Math.min(31, bright));
-            palette[i] = (bright * 255) / 31;
-        }
+        int contrast = regs[REG_CONTRAST];
+        int p0 = Math.max(0, Math.min(31, 31 - (regs[REG_PALETTE1] - contrast + 3))) * 255 / 31;
+        int p1 = Math.max(0, Math.min(31, 31 - (regs[REG_PALETTE2] - contrast + 3))) * 255 / 31;
+        int p2 = Math.max(0, Math.min(31, 31 - (regs[REG_PALETTE3] - contrast + 3))) * 255 / 31;
+        int p3 = Math.max(0, Math.min(31, 31 - (regs[REG_PALETTE4] - contrast + 3))) * 255 / 31;
 
         // Render VRAM bottom-to-top (matching MAME update_screen)
-        // VRAM byte i maps to screen position: x starts at 0, y starts at HEIGHT-1
         int x = 0;
         int y = HEIGHT - 1;
         for (int i = 0; i < VRAM_SIZE; i++) {
             int data = vram[i] & 0xFF;
+            int base = y * WIDTH + x;
             // 4 pixels per byte: bits 7-6, 5-4, 3-2, 1-0
-            pixels[y * WIDTH + x] = palette[(data >> 6) & 3]; x++;
-            pixels[y * WIDTH + x] = palette[(data >> 4) & 3]; x++;
-            pixels[y * WIDTH + x] = palette[(data >> 2) & 3]; x++;
-            pixels[y * WIDTH + x] = palette[(data >> 0) & 3]; x++;
+            // Inlined palette lookup to avoid array access
+            frameBuffer[base]     = switch ((data >> 6) & 3) { case 0 -> p0; case 1 -> p1; case 2 -> p2; default -> p3; };
+            frameBuffer[base + 1] = switch ((data >> 4) & 3) { case 0 -> p0; case 1 -> p1; case 2 -> p2; default -> p3; };
+            frameBuffer[base + 2] = switch ((data >> 2) & 3) { case 0 -> p0; case 1 -> p1; case 2 -> p2; default -> p3; };
+            frameBuffer[base + 3] = switch ((data >> 0) & 3) { case 0 -> p0; case 1 -> p1; case 2 -> p2; default -> p3; };
+            x += 4;
             if (x >= WIDTH) {
                 x = 0;
                 y--;
             }
         }
 
-        return pixels;
+        return frameBuffer;
     }
 
     /** Get raw VRAM for debugging. */

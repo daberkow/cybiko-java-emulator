@@ -136,20 +136,32 @@ public class CybikoXtreme {
             // Execute one frame's worth of cycles
             long remaining = maxSteps - totalSteps;
             int cycleBudget = (remaining > CYCLES_PER_FRAME) ? CYCLES_PER_FRAME : (int) remaining;
+
+            // Cache which timers are active to avoid method call overhead on stopped timers.
+            // Timer enable state can change mid-frame (via TSTR write), so we re-check each frame.
+            // Worst case: a timer enabled mid-frame gets delayed up to 1 frame (~16ms), acceptable.
+            boolean t8_0_run = timer8_0.isRunning();
+            boolean t8_1_run = timer8_1.isRunning();
+            boolean t16_0_run = timer16[0].isRunning();
+            boolean t16_1_run = timer16[1].isRunning();
+            boolean t16_2_run = timer16[2].isRunning();
+            boolean t16_3_run = timer16[3].isRunning();
+            boolean t16_4_run = timer16[4].isRunning();
+            boolean t16_5_run = timer16[5].isRunning();
+
             for (int i = 0; i < cycleBudget; i++) {
-                // Tick timers every cycle (even when CPU is halted/sleeping)
-                timer8_0.tick();
-                timer8_1.tick();
-                timer16[0].tick();
-                timer16[1].tick();
-                timer16[2].tick();
-                timer16[3].tick();
-                timer16[4].tick();
-                timer16[5].tick();
+                // Tick only active timers (even when CPU is halted/sleeping)
+                if (t8_0_run) timer8_0.tick();
+                if (t8_1_run) timer8_1.tick();
+                if (t16_0_run) timer16[0].tick();
+                if (t16_1_run) timer16[1].tick();
+                if (t16_2_run) timer16[2].tick();
+                if (t16_3_run) timer16[3].tick();
+                if (t16_4_run) timer16[4].tick();
+                if (t16_5_run) timer16[5].tick();
 
-                cpu.step(); // step() handles halt state and interrupt wake-up
+                cpu.step();
                 totalSteps++;
-
 
                 if (totalSteps >= maxSteps) break;
             }
@@ -188,9 +200,6 @@ public class CybikoXtreme {
                     cpu.getCCR(), cpu.getPendingInterruptCount(), isrCb, vramHash,
                     timer8_0.getTcr(), timer8_0.getTcnt(), timer8_0.getTcora(), timer8_0.getInterruptCount(),
                     timer8_1.getTcr(), timer8_1.getTcnt(), timer8_1.getTcora(), timer8_1.getInterruptCount());
-                if (frameCounter <= 300) {
-                    System.err.printf("  t8_0 breakdown: %s%n", timer8_0.getIrqBreakdown());
-                }
             }
 
             // Precise frame rate limiting (if we have a display)
