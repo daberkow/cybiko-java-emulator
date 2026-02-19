@@ -327,6 +327,22 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   for the Cybiko Xtreme's I2C wiring. The old disabled code shows the correct design.
   When MAME's active code doesn't work, check the `#if 0` blocks for the original intent.
 
+### 12. Timer isRunning() snapshot broke Timer8_1 mid-frame start (CRITICAL)
+- **Symptom**: CyOS stuck at logo screen (PC=0x4A3C40, halted=true). Timer8_0
+  interrupts fire but CyOS never progresses past the boot splash.
+- **Root cause**: Performance optimization snapshotted `timer8_1.isRunning()` once
+  at the start of each frame (every 307,200 cycles). CyOS starts Timer8_1 mid-frame
+  by writing TCR=0x03. The snapshot was `false` from frame start, so Timer8_1 wasn't
+  ticked for the rest of that frame. Timer8_1's overflow flag (read from TCSR at
+  0xFFFFB3 by CyOS scheduler at PC=0x49B920) never triggers at the expected time,
+  causing CyOS to miss its boot timeout and never wake from the splash screen.
+- **Fix**: Removed per-frame `isRunning()` snapshot. Tick all timers unconditionally
+  every cycle. Stopped timers return early from `tick()` via `if (divisor == 0) return`
+  which is fast enough (one branch per timer per cycle).
+- **Lesson**: Timer start/stop can happen at any cycle, not just at frame boundaries.
+  Caching running state per-frame creates a timing window where mid-frame timer starts
+  are delayed, which can break timing-sensitive OS schedulers.
+
 ## Current Status
 - CyOS fully boots to interactive "Congratulations!" welcome screen
 - Keyboard input works (letters, Fn+letter combos for numbers, navigation keys)

@@ -135,25 +135,16 @@ public class CybikoXtreme {
             // Execute one frame's worth of cycles
             long remaining = maxSteps - totalSteps;
             int cycleBudget = (remaining > CYCLES_PER_FRAME) ? CYCLES_PER_FRAME : (int) remaining;
-            // Snapshot which timers are running to avoid method calls on stopped timers
-            boolean t8_0_run = timer8_0.isRunning();
-            boolean t8_1_run = timer8_1.isRunning();
-            boolean t16_0_run = timer16[0].isRunning();
-            boolean t16_1_run = timer16[1].isRunning();
-            boolean t16_2_run = timer16[2].isRunning();
-            boolean t16_3_run = timer16[3].isRunning();
-            boolean t16_4_run = timer16[4].isRunning();
-            boolean t16_5_run = timer16[5].isRunning();
             for (int i = 0; i < cycleBudget; i++) {
                 // Tick timers every cycle (even when CPU is halted/sleeping)
-                if (t8_0_run) timer8_0.tick();
-                if (t8_1_run) timer8_1.tick();
-                if (t16_0_run) timer16[0].tick();
-                if (t16_1_run) timer16[1].tick();
-                if (t16_2_run) timer16[2].tick();
-                if (t16_3_run) timer16[3].tick();
-                if (t16_4_run) timer16[4].tick();
-                if (t16_5_run) timer16[5].tick();
+                timer8_0.tick();
+                timer8_1.tick();
+                timer16[0].tick();
+                timer16[1].tick();
+                timer16[2].tick();
+                timer16[3].tick();
+                timer16[4].tick();
+                timer16[5].tick();
 
                 cpu.step(); // step() handles halt state and interrupt wake-up
                 totalSteps++;
