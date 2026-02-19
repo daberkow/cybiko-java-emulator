@@ -30,7 +30,7 @@ public class PCF8593Rtc {
     private enum Mode { RECV, SEND }
     private boolean active = false; // I2C transaction in progress
     private Mode mode = Mode.RECV;
-    private int pinScl = 1;         // SCL pin state (0/1, matches MAME)
+    private int pinScl = 0;         // SCL starts LOW (matches portFDr initial value of 0)
     private int pinSda = 1;         // SDA pin state from host (0/1, matches MAME)
     private int inp = 1;            // SDA output from RTC (0=pull low, 1=release/high), read via sda_r()
     private int bits = 0;           // Bit counter within current byte
