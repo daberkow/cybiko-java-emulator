@@ -54,8 +54,6 @@ public class AddressBus {
 
     // RTC (PCF8593) connected via I2C on Port F
     private PCF8593Rtc rtc = new PCF8593Rtc();
-    private int portFDdr = 0;  // Port F DDR (0xFFFEBE) - tracks pin direction for I2C
-    private int portFDr = 0;   // Port F DR  (0xFFFF6E) - tracks output latch for I2C
 
     // I/O registers
     private int tstr = 0;    // Timer Start Register (0xFFFFC0)
@@ -102,15 +100,6 @@ public class AddressBus {
 
     /** Tick the RTC. Call once per frame to advance real-time clock. */
     public void tickRtc() { rtc.tick(); }
-
-    // No updateI2CPins() needed - SCL and SDA are triggered separately:
-    //   SCL: from Port F DR bit 1 (0xFFFF6E) - see DR write handler
-    //   SDA: from Port F DDR bit 6 (0xFFFEBE) - see DDR write handler
-    // This matches MAME's original Cybiko design (see cybiko_m.cpp #if0 block):
-    //   H8S_IO_PFDR  → scl_w(bit 1)     (SCL from Data Register)
-    //   H8S_IO_PFDDR → sda_w(~bit 6)    (SDA from Direction Register, inverted)
-    // The new MAME port system combined them via (DR|~DDR) formula which is
-    // a regression - it breaks the DDR-based open-drain I2C SDA control.
 
     public int read8(int address) {
         address &= 0xFFFFFF; // 24-bit address space
@@ -557,18 +546,9 @@ public class AddressBus {
             return;
         }
 
-        // Port DDR registers (0xFFFEB0-0xFFFEBF)
-        // Port F DDR (0xFFFEBE) controls I2C SDA via open-drain model:
-        //   DDR bit 6 = 0 (input)  → SDA released HIGH (I2C pull-up)
-        //   DDR bit 6 = 1 (output) → SDA pulled LOW (open-drain drive)
-        // This matches MAME's original Cybiko design: SDA from DDR, SCL from DR.
+        // Port DDR registers (0xFFFEB0-0xFFFEBF) - store in RAM
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
             onChipRam.write8(address - 0xFFDC00, value);
-            if (address == 0xFFFEBE) {
-                portFDdr = value & 0xFF;
-                // SDA: DDR bit 6 inverted (DDR=0 → SDA HIGH, DDR=1 → SDA LOW)
-                rtc.sda_w((portFDdr & 0x40) == 0);
-            }
             return;
         }
 
@@ -583,12 +563,12 @@ public class AddressBus {
             return;
         }
 
-        // Port F write (0xFFFF6E) - I2C RTC SCL from DR bit 1
-        // Matches MAME's original Cybiko design: SCL from DR, SDA from DDR.
+        // Port F write (0xFFFF6E) - I2C RTC bit-banging
+        // Bit 1 (0x02) = SCL, Bit 6 (0x40) = SDA (inverted: 0=release/high, 1=pull low)
         if (address == 0xFFFF6E) {
-            portFDr = value & 0xFF;
+            rtc.scl_w((value & 0x02) != 0);
+            rtc.sda_w((value & 0x40) == 0); // Inverted: write 0x40 = SDA low, write 0x00 = SDA high
             onChipRam.write8(address - 0xFFDC00, value);
-            rtc.scl_w((portFDr & 0x02) != 0);
             return;
         }
 

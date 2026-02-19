@@ -3,6 +3,7 @@ package org.example.cybiko;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.zip.CRC32;
 
 /**
  * Cybiko Xtreme emulator - main orchestrator.
@@ -179,9 +180,12 @@ public class CybikoXtreme {
             // Periodic status (every ~1 second at 60fps)
             if (frameCounter % 60 == 0) {
                 int isrCb = bus.read32(0xFFECA8);
-                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b CCR=0x%02X pending=%d isr=0x%06X t8_0[tcr=%02X cnt=%02X cora=%02X irqs=%d] t8_1[tcr=%02X cnt=%02X cora=%02X irqs=%d]%n",
+                CRC32 crc = new CRC32();
+                crc.update(lcd.getVram());
+                long vramHash = crc.getValue();
+                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b CCR=0x%02X pending=%d isr=0x%06X vram=%08X t8_0[tcr=%02X cnt=%02X cora=%02X irqs=%d] t8_1[tcr=%02X cnt=%02X cora=%02X irqs=%d]%n",
                     frameCounter, totalSteps, cpu.getPC(), cpu.isHalted(),
-                    cpu.getCCR(), cpu.getPendingInterruptCount(), isrCb,
+                    cpu.getCCR(), cpu.getPendingInterruptCount(), isrCb, vramHash,
                     timer8_0.getTcr(), timer8_0.getTcnt(), timer8_0.getTcora(), timer8_0.getInterruptCount(),
                     timer8_1.getTcr(), timer8_1.getTcnt(), timer8_1.getTcora(), timer8_1.getInterruptCount());
                 if (frameCounter <= 300) {

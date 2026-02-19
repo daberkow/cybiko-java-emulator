@@ -30,7 +30,7 @@ public class PCF8593Rtc {
     private enum Mode { RECV, SEND }
     private boolean active = false; // I2C transaction in progress
     private Mode mode = Mode.RECV;
-    private int pinScl = 0;         // SCL starts LOW (matches portFDr initial value of 0)
+    private int pinScl = 1;         // SCL pin state (0/1, matches MAME)
     private int pinSda = 1;         // SDA pin state from host (0/1, matches MAME)
     private int inp = 1;            // SDA output from RTC (0=pull low, 1=release/high), read via sda_r()
     private int bits = 0;           // Bit counter within current byte
@@ -46,7 +46,6 @@ public class PCF8593Rtc {
     private long nanosAccum = 0;
 
     private int debugCount = 0;
-    private static final int DEBUG_LIMIT = 50;
 
     public PCF8593Rtc() {
         // Initialize with current system time
@@ -58,14 +57,6 @@ public class PCF8593Rtc {
         data[4] = toBcd(now.getHour());
         data[5] = (((now.getYear() % 4)) << 6) | toBcd(now.getDayOfMonth());
         data[6] = toBcd(now.getMonthValue());
-        // Register 7: year base for CyOS year calculation.
-        // CyOS reads this as BCD, adds 100, then combines with the 2-bit year
-        // in register 5 to compute the full year since 1900.
-        // Formula: data[7] = toBcd(year - 2000) for years >= 2000.
-        int yearOffset = now.getYear() - 2000;
-        if (yearOffset >= 0 && yearOffset <= 99) {
-            data[7] = toBcd(yearOffset);
-        }
         lastTickNanos = System.nanoTime();
     }
 
@@ -120,11 +111,6 @@ public class PCF8593Rtc {
         return inp != 0;
     }
 
-    /** Whether an I2C transaction is in progress (for pin ordering decisions). */
-    public boolean isActive() {
-        return active;
-    }
-
     /**
      * Set SCL line state (from Port F write bit 1).
      * Matches MAME pcf8593.cpp scl_w() exactly.
@@ -150,34 +136,29 @@ public class PCF8593Rtc {
                         // ACK: pull SDA low to acknowledge the received byte
                         inp = 0;
                         int received = dataRecv[dataRecvIndex] & 0xFF;
-                        if (debugCount < DEBUG_LIMIT) {
+                        if (debugCount < 30) {
                             System.err.printf("[I2C] Received byte 0x%02X (idx=%d)%n", received, dataRecvIndex);
                         }
                         // First byte 0xA3 = switch to read/send mode
                         if (dataRecv[0] == 0xA3 && dataRecvIndex == 0) {
                             mode = Mode.SEND;
-                            if (debugCount < DEBUG_LIMIT) {
+                            if (debugCount < 30) {
                                 System.err.printf("[I2C] READ mode, sending from pos=%d%n", pos);
                             }
                         }
                         // First byte 0xA2 + second byte = set register position
-                        // Store full 8-bit value (matching MAME). CyOS sends 0x80+
-                        // for alarm registers; only lower 4 bits address real regs.
                         if (dataRecv[0] == 0xA2 && dataRecvIndex == 1) {
-                            pos = dataRecv[1] & 0xFF;
-                            if (debugCount < DEBUG_LIMIT) {
-                                System.err.printf("[I2C] Register pointer = 0x%02X%n", pos);
+                            pos = dataRecv[1] & 0x0F;
+                            if (debugCount < 30) {
+                                System.err.printf("[I2C] Register pointer = %d%n", pos);
                             }
                         }
                         // 0xA2 + pos + data bytes = write registers
                         if (dataRecv[0] == 0xA2 && dataRecvIndex >= 2) {
-                            int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0xFF;
-                            if (rtcPos < data.length) {
-                                data[rtcPos] = received;
-                            }
-                            if (debugCount < DEBUG_LIMIT) {
-                                System.err.printf("[I2C] Write reg[0x%02X] = 0x%02X%s%n",
-                                    rtcPos, received, rtcPos >= data.length ? " (ignored)" : "");
+                            int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0x0F;
+                            data[rtcPos] = received;
+                            if (debugCount < 30) {
+                                System.err.printf("[I2C] Write reg[%d] = 0x%02X%n", rtcPos, received);
                             }
                         }
                         bits = 0;
@@ -186,13 +167,12 @@ public class PCF8593Rtc {
                 }
                 case SEND -> {
                     // RTC -> HOST: clock out a bit
-                    int sendByte = (pos < data.length) ? data[pos] : 0;
-                    inp = (sendByte >> (7 - bits)) & 1;
+                    inp = (data[pos] >> (7 - bits)) & 1;
                     bits++;
                     // After 8 data bits + ACK
                     if (bits > 8) {
-                        if (debugCount < DEBUG_LIMIT) {
-                            System.err.printf("[I2C] Sent byte 0x%02X from pos=0x%02X%n", sendByte, pos);
+                        if (debugCount < 30) {
+                            System.err.printf("[I2C] Sent byte 0x%02X from pos=%d%n", data[pos], pos);
                         }
                         // Check master ACK/NACK
                         if (pinSda != 0) {
@@ -202,7 +182,7 @@ public class PCF8593Rtc {
                             clearBufferRx();
                         }
                         bits = 0;
-                        pos = (pos + 1) & 0xFF; // uint8_t wrap (matches MAME)
+                        pos = (pos + 1) & 0x0F;
                     }
                 }
             }
@@ -210,19 +190,16 @@ public class PCF8593Rtc {
         pinScl = state;
     }
 
-    /**
-     * Set SDA line state (from Port F output, already inverted by caller).
-     * Matches MAME pcf8593.cpp sda_w() exactly: simple pinSda transition check.
-     */
+    /** Set SDA line state (from Port F write bit 6, INVERTED). */
     public void sda_w(boolean high) {
         int state = high ? 1 : 0;
 
-        // Check for START/STOP conditions while SCL is high (matches MAME)
+        // Check for START/STOP conditions while SCL is high
         if (pinScl != 0) {
             // START: SDA high -> low while SCL high
             if (state == 0 && pinSda != 0) {
-                if (debugCount++ < DEBUG_LIMIT) {
-                    System.err.printf("[I2C] START%n");
+                if (debugCount++ < 30) {
+                    System.err.println("[I2C] START condition");
                 }
                 active = true;
                 bits = 0;
@@ -231,11 +208,11 @@ public class PCF8593Rtc {
             }
             // STOP: SDA low -> high while SCL high
             if (state != 0 && pinSda == 0) {
-                if (debugCount++ < DEBUG_LIMIT) {
-                    System.err.printf("[I2C] STOP%n");
+                if (debugCount++ < 30) {
+                    System.err.println("[I2C] STOP condition");
                 }
                 active = false;
-                inp = 1; // Release SDA on stop (must be HIGH/idle for CyOS boot)
+                inp = 1; // Release SDA on stop
             }
         }
         pinSda = state;

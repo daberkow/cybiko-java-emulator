@@ -193,6 +193,21 @@ Key registers the boot code accesses:
 10. Jumps to CyOS entry point at 0x4A3BF8
 11. CyOS initializes task stack, installs timer callbacks, enters main loop
 
+## Boot Phases (VRAM CRC32 Hashes)
+The STATUS log includes a `vram=` field with CRC32 of the 4000-byte LCD VRAM.
+Use these hashes to identify boot progress in headless testing.
+
+| Phase | Frames | VRAM Hash  | Description | PC |
+|-------|--------|------------|-------------|-----|
+| 1 | ~1-60 | 65232E60 | Boot ROM: "Cybiko" logo top third | 0x0076B2 (boot ROM) |
+| 2 | ~60-240 | AA3312CC | "Cybiko" + "Loading CyOS 1.5.08" | 0x4A3C40 (halted) |
+| 3 | ~240-300 | C0DBEF72 | Animated Cybiko logo (CyOS init) | 0x488900 / 0x003AD8 |
+| 4 | ~360+ | FAEDD600 | Welcome screen / desktop (no NVRAM) | 0x4A3C40 (halted, waiting for input) |
+
+Phase 4 hash will differ with NVRAM (desktop vs welcome screen). Hashes may vary
+if LCD palette or contrast settings change. The user should confirm these hashes
+match what they see on the GUI display.
+
 ## Bugs Found & Fixed
 
 ### 1. LCD alternating black rows
@@ -289,45 +304,22 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   MAME itself has `m_inp = 0` with a FIXME comment saying "sda should default 1
   not 0" - our old working code got this right with `sdaOut = true`.
 
-### 10. RTC register pointer masking clobbered time data
-- **Symptom**: CyOS displayed garbled date/time values (e.g., "228.18.1900")
-- **Root cause**: CyOS sends register address 0x80 for alarm/timer configuration.
-  Our code masked with `& 0x0F`, mapping 0x80 → 0x00, so alarm writes went to the
-  control register (stopping the clock with bit 7) and overwrote time data.
-  MAME's pcf8593.cpp stores `m_pos = m_data_recv[1]` WITHOUT masking (m_pos is uint8_t).
-- **Fix**: Store register pointer as full 8-bit value (`pos = dataRecv[1] & 0xFF`).
-  Added bounds checking (`if (rtcPos < data.length)`) instead of masking. Writes to
-  addresses >= 16 are safely ignored. Pos wraps at 0xFF matching MAME uint8_t behavior.
+### 10. I2C separate SCL/SDA triggers broke boot (REVERTED)
+- **Attempted**: Split I2C triggering so SCL comes from DR (0xFFFF6E) and SDA from
+  DDR (0xFFFEBE), matching MAME's `#if 0` block in cybiko_m.cpp. Also changed register
+  pointer masking from `& 0x0F` to `& 0xFF` to handle alarm register addresses (0x80+).
+- **Result**: CyOS never progressed past boot phase 3 (animated logo). Multiple
+  iterations of fixes (open-drain model, hybrid pin ordering, DDR-based SDA) all
+  failed to produce a working I2C read sequence. The clock display remained broken.
+- **Reverted to**: d75fd54 approach where BOTH SCL and SDA are triggered from Port F
+  DR writes (0xFFFF6E). This is simpler and works reliably for boot. The RTC clock
+  display still shows wrong values but CyOS boots fully.
+- **Lesson**: Sometimes the simpler approach works even if it doesn't match the
+  hardware exactly. The d75fd54 I2C model works because CyOS's bit-bang sequence
+  writes both SCL and SDA bits to the DR in the same byte write, so triggering both
+  from DR captures the correct state transitions. Revisit I2C if clock accuracy needed.
 
-### 11. I2C SCL/SDA combined trigger prevented repeated START (CRITICAL)
-- **Symptom**: CyOS never sent I2C read transactions (0xA3). Only write transactions
-  (0xA2) were seen. Without reads, CyOS couldn't get time data from the RTC.
-- **Root cause**: The combined `updateI2CPins()` handler processed both SCL and SDA
-  from a single DDR or DR write, using hybrid pin ordering (SDA-first when idle,
-  SCL-first when active). After an ACK (RTC holds SDA LOW via inp=0), the combined
-  bus SDA check `(pinSda != 0) && (inp != 0)` was always false, making it impossible
-  to detect the SDA transitions needed for repeated START conditions.
-
-  **The real issue**: MAME's original Cybiko code (inside `#if 0` in cybiko_m.cpp)
-  had SCL triggered from DR writes and SDA triggered from DDR writes as **separate**
-  handlers. The new MAME port system combined them via the `(DR | ~DDR)` formula,
-  which broke DDR-based open-drain I2C SDA control (DDR=0 gives output=1, which
-  with SDA inversion means SDA LOW when it should be HIGH/released).
-
-  CyOS I2C bit-bang (confirmed from ROM disassembly at 0x4A4566-0x4A4668):
-  - SDA is controlled via **DDR writes** to 0xFFFEBE (bit 6, inverted)
-  - SCL is controlled via **DR writes** using `BSET/BCLR #1, @0xFFFF6E` (8-byte
-    memory bit operation instructions: `6A 38 00FF FF6E 70/72 10`)
-  - These are from different register writes and must trigger independently
-
-- **Fix**: Removed combined `updateI2CPins()`. DDR write (0xFFFEBE) triggers only
-  `rtc.sda_w()`. DR write (0xFFFF6E) triggers only `rtc.scl_w()`. Also reverted
-  `sda_w()` to simple `pinSda` transition check (matching MAME pcf8593.cpp).
-- **Lesson**: The MAME port system's `(DR | ~DDR)` output formula is a regression
-  for the Cybiko Xtreme's I2C wiring. The old disabled code shows the correct design.
-  When MAME's active code doesn't work, check the `#if 0` blocks for the original intent.
-
-### 12. Timer isRunning() snapshot broke Timer8_1 mid-frame start (CRITICAL)
+### 11. Timer isRunning() snapshot broke Timer8_1 mid-frame start (CRITICAL)
 - **Symptom**: CyOS stuck at logo screen (PC=0x4A3C40, halted=true). Timer8_0
   interrupts fire but CyOS never progresses past the boot splash.
 - **Root cause**: Performance optimization snapshotted `timer8_1.isRunning()` once
@@ -343,18 +335,26 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   Caching running state per-frame creates a timing window where mid-frame timer starts
   are delayed, which can break timing-sensitive OS schedulers.
 
+## Known Issues
+- **RTC clock display wrong**: CyOS shows incorrect date/time. The I2C protocol works
+  for basic transactions but the clock values aren't correct. The d75fd54-style I2C
+  (both SCL/SDA from Port F DR) may not properly handle all CyOS read sequences.
+  Needs investigation.
+- **Fn+letter numbers show letter first**: Pressing a number key (e.g., "1" = Fn+Q)
+  briefly shows the letter ("q") before the number ("1"). Both keys are set
+  simultaneously in SwingRenderer but CyOS may scan the letter column before Fn.
+
 ## Current Status
-- CyOS fully boots to interactive "Congratulations!" welcome screen
-- Keyboard input works (letters, Fn+letter combos for numbers, navigation keys)
-- RTC with working I2C bit-bang protocol (reads and writes all registers correctly)
-- Clock shows default date on fresh boot (Jan 1, 2000) - set time via CyOS Settings
+- CyOS fully boots to interactive "Congratulations!" welcome screen (or desktop with NVRAM)
+- Keyboard input works (letters, navigation keys, Fn+letter for numbers with minor timing issue)
+- RTC I2C protocol handles basic transactions; clock display shows wrong values (known issue)
 - LCD renders full CyOS UI with menus and text input
 - Timer8 and Timer16 interrupts drive the OS scheduler
 - DMA controller handles keyboard matrix scans
 - App loading via CFS filesystem (--app wraps .app files in proper CFS block format)
 - Persistent NVRAM (--nvram saves/restores external RAM between sessions)
 - Speaker audio output (1-bit, Port 1 bit 3 / TIOCB1)
-- Performance: disabled timer skip, cached clock divisors, conditional debug instrumentation
+- VRAM CRC32 hash in STATUS log for automated boot phase detection
 - No unimplemented opcodes in the current execution path
 
 ## Keyboard Matrix
@@ -425,18 +425,13 @@ Implemented in AddressBus. The H8S/2323 has a 4-channel DMA controller (DMAC).
 ## PCF8593 RTC (I2C Protocol)
 Real-time clock connected via I2C bit-bang on Port F.
 
-### Port F Pin Wiring (CRITICAL - confirmed from ROM disassembly)
-- **SCL**: Driven by Port F **DR** (0xFFFF6E) bit 1, direct polarity
-  - CyOS uses `BSET #1, @0xFFFF6E` / `BCLR #1, @0xFFFF6E` (8-byte memory bit ops)
-  - Trigger: DR write → `rtc.scl_w((portFDr & 0x02) != 0)`
-- **SDA write**: Driven by Port F **DDR** (0xFFFEBE) bit 6, **inverted**
-  - DDR=0 (input) → SDA HIGH (I2C pull-up), DDR=1 (output) → SDA LOW
-  - CyOS writes 0x8B (bit 6=0, SDA HIGH) or 0xCB (bit 6=1, SDA LOW)
-  - Trigger: DDR write → `rtc.sda_w((portFDdr & 0x40) == 0)`
-- **SDA readback**: Port F input register (0xFFFF5E) bit 6, **NOT inverted**
-  - CyOS reads via `MOV.B @0xFFFF5E:8, R2L` then `BLD #6, R2L` / `BTST #6, R2L`
-- **IMPORTANT**: SCL and SDA are triggered from DIFFERENT registers (DR vs DDR).
-  They must be handled as independent triggers, not combined.
+### Port F Pin Wiring
+- **SCL**: Port F DR (0xFFFF6E) bit 1 (0x02), direct polarity
+- **SDA write**: Port F DR (0xFFFF6E) bit 6 (0x40), **inverted** (0x40=SDA low, 0x00=SDA high)
+- **SDA readback**: Port F input register (0xFFFF5E) bit 6, NOT inverted
+- Both SCL and SDA are triggered from the same Port F DR write (d75fd54 approach).
+  An attempt to split them (SCL from DR, SDA from DDR per MAME's `#if 0` block)
+  broke CyOS boot and was reverted (see bug #10).
 - Note: MAME has `m_inp = 0` default with FIXME "sda should default 1 not 0".
   Our `inp` must be 1 (idle high) or CyOS fails to boot (see bug #9).
 
@@ -447,8 +442,8 @@ Real-time clock connected via I2C bit-bang on Port F.
 - Data: MSB-first, sampled on SCL rising edge
 - ACK: 9th bit, device pulls SDA low to acknowledge
 - Repeated START: START condition without preceding STOP (used for read sequences)
-- Register auto-increment after each byte, wraps at 0xFF (uint8_t)
-- Register pointer stored as full 8-bit value; writes to addresses >= 16 are ignored
+- Register auto-increment after each byte, wraps at 0x0F (16 registers)
+- Register pointer masked to 4 bits (`& 0x0F`)
 
 ### PCF8593 Register Map
 | Reg | Contents              | Format      |
@@ -463,7 +458,12 @@ Real-time clock connected via I2C bit-bang on Port F.
 | 7   | Timer / **Year counter** (CyOS-specific) | BCD, see below |
 | 8-15 | Alarm registers       | CyOS writes defaults on boot |
 
-### CyOS Clock Protocol (from ROM disassembly at 0x4A46A4-0x4A47F0)
+### CyOS Clock Protocol (EXPERIMENTAL - not yet working in emulator)
+From ROM disassembly at 0x4A46A4-0x4A47F0. This documents how CyOS expects the
+RTC to behave. Currently the I2C reads don't return correct values because the
+d75fd54-style DR-based triggering doesn't properly handle all I2C sequences.
+Fixing this requires getting the DDR-based SDA approach working (see bug #10).
+
 CyOS does NOT use the RTC as an autonomous clock. Instead:
 
 1. **Boot init**: Reads all 16 registers, then writes defaults:
@@ -486,12 +486,12 @@ CyOS does NOT use the RTC as an autonomous clock. Instead:
    - reg7=0x99 → year 99 (special case for 1999)
    - Checks 2-bit year-in-cycle from reg 5 bits 7-6 vs `year % 4`
    - If mismatch: increments year, writes back via `(year + 0x9C) & 0xFF` → BCD → reg 7
-   - Write formula: `ADD.B #0x9C` is a mod-256 trick: (year + 156) mod 256 = year - 100
 
 4. **Fresh boot default**: Year = 100 (2000), Jan 1, 00:00:00. Time set via CyOS Settings
-   persists in NVRAM. The RTC maintains elapsed time while CyOS is running.
+   persists in NVRAM.
 
-### CyOS I2C Bit-Bang Functions (in decompressed CyOS at 0x4A4558-0x4A4668)
+### CyOS I2C Bit-Bang Functions (EXPERIMENTAL - for future RTC fix)
+Disassembled from decompressed CyOS at 0x4A4558-0x4A4668:
 | Address | Function | Description |
 |---------|----------|-------------|
 | 0x4A4558 | delay | 6 NOPs + RTS (~6 CPU cycles delay for I2C timing) |
