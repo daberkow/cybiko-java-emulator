@@ -54,6 +54,8 @@ public class AddressBus {
 
     // RTC (PCF8593) connected via I2C on Port F
     private PCF8593Rtc rtc = new PCF8593Rtc();
+    private int portFDdr = 0;  // Port F DDR (0xFFFEBE) - tracks pin direction for I2C
+    private int portFDr = 0;   // Port F DR  (0xFFFF6E) - tracks output latch for I2C
 
     // I/O registers
     private int tstr = 0;    // Timer Start Register (0xFFFFC0)
@@ -100,6 +102,53 @@ public class AddressBus {
 
     /** Tick the RTC. Call once per frame to advance real-time clock. */
     public void tickRtc() { rtc.tick(); }
+
+    /**
+     * Compute I2C pin states from Port F DDR + DR using open-drain model.
+     *
+     * CyOS uses DDR toggling for SDA data (DDR bit 6 = 0 → HIGH via pull-up,
+     * DDR bit 6 = 1 → driven by DR bit 6 inverted). CyOS also uses DR bit 6
+     * directly for some bits (DR6=0 inverted = HIGH, DR6=1 inverted = LOW).
+     *
+     * NOTE: MAME's port formula (DR | ~DDR) does NOT work here because with
+     * DR bit 6 = 1, output bit 6 is always 1 regardless of DDR, making SDA
+     * always LOW. The open-drain model correctly reflects I2C pull-up behavior.
+     *
+     * Pin ordering depends on context:
+     * - Not active (idle): SDA-first, so START is detected when both pins
+     *   drop simultaneously from idle HIGH (CyOS's first DDR write).
+     * - Active (transaction): SCL-first prevents false START/STOP when both
+     *   pins change simultaneously during data clocking (e.g., after ACK read,
+     *   CyOS drops both SCL and SDA in one DR write for data setup).
+     */
+    private boolean lastI2cSda = true;  // Open-drain idle: HIGH (pull-up)
+    private boolean lastI2cScl = true;  // Open-drain idle: HIGH (pull-up)
+    private void updateI2CPins() {
+        // Open-drain model:
+        // DDR=0 (input): pin floats HIGH (I2C pull-up)
+        // DDR=1 (output): pin driven by DR (SDA inverted, SCL direct)
+        boolean sdaHigh = (portFDdr & 0x40) == 0 || (portFDr & 0x40) == 0;
+        boolean sclHigh = (portFDdr & 0x02) == 0 || (portFDr & 0x02) != 0;
+
+        if (sdaHigh == lastI2cSda && sclHigh == lastI2cScl) return;
+
+        boolean bothChanged = (sdaHigh != lastI2cSda) && (sclHigh != lastI2cScl);
+        lastI2cSda = sdaHigh;
+        lastI2cScl = sclHigh;
+
+        if (bothChanged && !rtc.isActive()) {
+            // Both pins changed from idle (no active transaction).
+            // SDA-first detects START when both drop from HIGH (idle→active),
+            // since SDA falls while pinScl is still HIGH from the previous state.
+            rtc.sda_w(sdaHigh);
+            rtc.scl_w(sclHigh);
+        } else {
+            // Active transaction or single pin change: SCL-first prevents
+            // false START/STOP during data clocking (SCL drops before SDA).
+            rtc.scl_w(sclHigh);
+            rtc.sda_w(sdaHigh);
+        }
+    }
 
     public int read8(int address) {
         address &= 0xFFFFFF; // 24-bit address space
@@ -546,10 +595,16 @@ public class AddressBus {
             return;
         }
 
-        // Port DDR registers (0xFFFEB0-0xFFFEBF) - store in RAM
-        // Port F DDR at 0xFFFEBE - just store it
+        // Port DDR registers (0xFFFEB0-0xFFFEBF)
+        // Port F DDR (0xFFFEBE) controls I2C pin direction (open-drain):
+        //   DDR bit=1 (output) → pin driven by DR value
+        //   DDR bit=0 (input)  → pin floats high (external pull-up)
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
             onChipRam.write8(address - 0xFFDC00, value);
+            if (address == 0xFFFEBE) {
+                portFDdr = value & 0xFF;
+                updateI2CPins();
+            }
             return;
         }
 
@@ -565,11 +620,11 @@ public class AddressBus {
         }
 
         // Port F write (0xFFFF6E) - I2C RTC bit-banging
-        // Bit 1 (0x02) = SCL, Bit 6 (0x40) = SDA (inverted: 0=release/high, 1=pull low)
+        // Pin states are computed from DDR + DR together (see updateI2CPins)
         if (address == 0xFFFF6E) {
-            rtc.scl_w((value & 0x02) != 0);
-            rtc.sda_w((value & 0x40) == 0); // Inverted: write 0x40 = SDA low, write 0x00 = SDA high
+            portFDr = value & 0xFF;
             onChipRam.write8(address - 0xFFDC00, value);
+            updateI2CPins();
             return;
         }
 

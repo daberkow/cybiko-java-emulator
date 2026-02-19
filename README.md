@@ -50,4 +50,5 @@ The Cybiko keyboard is mapped to your PC keyboard. Letters map directly, navigat
 
 - [Cybiko Archive](https://archive.org/details/cybiko) - ROMs, apps, and documentation
 - [Cybiko ROMs (MAME)](https://ia803204.us.archive.org/view_archive.php?archive=/29/items/mame-0.221-roms-merged/cybikov1.zip)
+- [MAME Code](https://github.com/mamedev/mame/blob/master/src/mame/cybiko/cybiko.cpp)
 - [Tim's Web Emulator](https://www.schuerewegen.tk/cybiko/emu/) - WASM version by the original MAME author

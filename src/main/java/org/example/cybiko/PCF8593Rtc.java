@@ -46,6 +46,7 @@ public class PCF8593Rtc {
     private long nanosAccum = 0;
 
     private int debugCount = 0;
+    private static final int DEBUG_LIMIT = 30;
 
     public PCF8593Rtc() {
         // Initialize with current system time
@@ -111,6 +112,11 @@ public class PCF8593Rtc {
         return inp != 0;
     }
 
+    /** Whether an I2C transaction is in progress (for pin ordering decisions). */
+    public boolean isActive() {
+        return active;
+    }
+
     /**
      * Set SCL line state (from Port F write bit 1).
      * Matches MAME pcf8593.cpp scl_w() exactly.
@@ -136,20 +142,20 @@ public class PCF8593Rtc {
                         // ACK: pull SDA low to acknowledge the received byte
                         inp = 0;
                         int received = dataRecv[dataRecvIndex] & 0xFF;
-                        if (debugCount < 30) {
+                        if (debugCount < DEBUG_LIMIT) {
                             System.err.printf("[I2C] Received byte 0x%02X (idx=%d)%n", received, dataRecvIndex);
                         }
                         // First byte 0xA3 = switch to read/send mode
                         if (dataRecv[0] == 0xA3 && dataRecvIndex == 0) {
                             mode = Mode.SEND;
-                            if (debugCount < 30) {
+                            if (debugCount < DEBUG_LIMIT) {
                                 System.err.printf("[I2C] READ mode, sending from pos=%d%n", pos);
                             }
                         }
                         // First byte 0xA2 + second byte = set register position
                         if (dataRecv[0] == 0xA2 && dataRecvIndex == 1) {
                             pos = dataRecv[1] & 0x0F;
-                            if (debugCount < 30) {
+                            if (debugCount < DEBUG_LIMIT) {
                                 System.err.printf("[I2C] Register pointer = %d%n", pos);
                             }
                         }
@@ -157,7 +163,7 @@ public class PCF8593Rtc {
                         if (dataRecv[0] == 0xA2 && dataRecvIndex >= 2) {
                             int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0x0F;
                             data[rtcPos] = received;
-                            if (debugCount < 30) {
+                            if (debugCount < DEBUG_LIMIT) {
                                 System.err.printf("[I2C] Write reg[%d] = 0x%02X%n", rtcPos, received);
                             }
                         }
@@ -171,7 +177,7 @@ public class PCF8593Rtc {
                     bits++;
                     // After 8 data bits + ACK
                     if (bits > 8) {
-                        if (debugCount < 30) {
+                        if (debugCount < DEBUG_LIMIT) {
                             System.err.printf("[I2C] Sent byte 0x%02X from pos=%d%n", data[pos], pos);
                         }
                         // Check master ACK/NACK
@@ -194,22 +200,29 @@ public class PCF8593Rtc {
     public void sda_w(boolean high) {
         int state = high ? 1 : 0;
 
-        // Check for START/STOP conditions while SCL is high
+        // Check for START/STOP conditions while SCL is high.
+        // Use combined open-drain bus SDA state: SDA is HIGH only when BOTH
+        // host and RTC release it. This prevents false STOP after ACK: the RTC
+        // holds SDA LOW (inp=0) for ACK, so even if the host releases SDA,
+        // the bus stays LOW and no STOP is detected.
         if (pinScl != 0) {
-            // START: SDA high -> low while SCL high
-            if (state == 0 && pinSda != 0) {
-                if (debugCount++ < 30) {
-                    System.err.println("[I2C] START condition");
+            boolean oldBus = (pinSda != 0) && (inp != 0);
+            boolean newBus = (state != 0) && (inp != 0);
+
+            // START: bus SDA high -> low while SCL high
+            if (!newBus && oldBus) {
+                if (debugCount++ < DEBUG_LIMIT) {
+                    System.err.printf("[I2C] START%n");
                 }
                 active = true;
                 bits = 0;
                 dataRecvIndex = 0;
                 clearBufferRx();
             }
-            // STOP: SDA low -> high while SCL high
-            if (state != 0 && pinSda == 0) {
-                if (debugCount++ < 30) {
-                    System.err.println("[I2C] STOP condition");
+            // STOP: bus SDA low -> high while SCL high
+            if (newBus && !oldBus) {
+                if (debugCount++ < DEBUG_LIMIT) {
+                    System.err.printf("[I2C] STOP%n");
                 }
                 active = false;
                 inp = 1; // Release SDA on stop
