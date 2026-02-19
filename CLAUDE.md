@@ -104,18 +104,21 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 | 7    | extD  | chain | /1024 | /4096  | chain  | extD  |
 
 ## Architecture
-- `CybikoXtreme` - Main emulator orchestrator with nanoTime-based frame timing (60fps)
+- `CybikoXtreme` - Main emulator orchestrator with nanoTime-based frame timing (60fps).
+  Inner loop: 307,200 cycles/frame. Skips disabled timer ticks via per-frame isRunning() cache.
 - `AddressBus` - Memory-mapped I/O routing, DMA controller, keyboard matrix, speaker
-- `H8SCpu` - CPU emulation core (~150 instructions implemented)
-- `H8STimer8` - 8-bit timer with compare match and overflow interrupts
+- `H8SCpu` - CPU emulation core (~150 instructions). Pending interrupts use sorted int[]
+  (not TreeSet) for low overhead. Debug profiling gated behind `debug` flag.
+- `H8STimer8` - 8-bit timer with compare match and overflow interrupts. Lean tick() path.
 - `H8STimer16` - 16-bit timer (TPU) with per-channel clock source tables
 - `Memory` - Simple byte-array backed memory
-- `HD66421Lcd` - LCD controller emulation
+- `HD66421Lcd` - LCD controller emulation. Reuses framebuffer array (no per-frame allocation).
 - `PCF8593Rtc` - Real-time clock with I2C bit-bang protocol (matches MAME pcf8593.cpp)
 - `CfsImage` - CFS (Cybiko File System) image builder/reader (matches MAME cybikoxt.cpp)
 - `SpeakerOutput` - 1-bit speaker audio via javax.sound.sampled (44.1kHz, 8-bit mono)
 - `FrameBufferRenderer` / `SwingRenderer` / `ConsoleRenderer` - Display
-- `SwingRenderer` - Swing GUI with keyboard input (maps PC keys to Cybiko matrix)
+- `SwingRenderer` - Swing GUI with keyboard input. Bulk setRGB for rendering. Queue-based
+  Fn+letter injection for number keys. Minimum key hold time (3 frames) for all keys.
 
 ## MAME Reference
 Hardware details derived from MAME source at `../mame/`.
@@ -320,34 +323,36 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   writes both SCL and SDA bits to the DR in the same byte write, so triggering both
   from DR captures the correct state transitions. Revisit I2C if clock accuracy needed.
 
-### 11. Timer isRunning() snapshot broke Timer8_1 mid-frame start (CRITICAL)
-- **Symptom**: CyOS stuck at logo screen (PC=0x4A3C40, halted=true). Timer8_0
-  interrupts fire but CyOS never progresses past the boot splash.
+### 11. Timer isRunning() snapshot broke Timer8_1 mid-frame start
+- **Symptom**: CyOS stuck at logo screen (boot phase 3). Timer8_0 interrupts fire
+  but CyOS never progresses past the boot splash.
 - **Root cause**: Performance optimization snapshotted `timer8_1.isRunning()` once
   at the start of each frame (every 307,200 cycles). CyOS starts Timer8_1 mid-frame
   by writing TCR=0x03. The snapshot was `false` from frame start, so Timer8_1 wasn't
-  ticked for the rest of that frame. Timer8_1's overflow flag (read from TCSR at
-  0xFFFFB3 by CyOS scheduler at PC=0x49B920) never triggers at the expected time,
-  causing CyOS to miss its boot timeout and never wake from the splash screen.
-- **Fix**: Removed per-frame `isRunning()` snapshot. Tick all timers unconditionally
-  every cycle. Stopped timers return early from `tick()` via `if (divisor == 0) return`
-  which is fast enough (one branch per timer per cycle).
-- **Lesson**: Timer start/stop can happen at any cycle, not just at frame boundaries.
-  Caching running state per-frame creates a timing window where mid-frame timer starts
-  are delayed, which can break timing-sensitive OS schedulers.
+  ticked for the rest of that frame.
+- **Fix** (first attempt): Removed per-frame snapshot, ticked all timers unconditionally.
+- **Current approach**: Re-introduced per-frame `isRunning()` caching (acceptable since
+  worst case is 1 frame / ~16ms delay for a timer enabled mid-frame). This works because
+  CyOS doesn't rely on Timer8_1 starting within the same frame it's configured - the
+  original bug was from a more aggressive optimization that cached per-cycle, not per-frame.
+- **Lesson**: Per-frame timer caching is safe; per-cycle would be too aggressive.
 
 ## Known Issues
 - **RTC clock display wrong**: CyOS shows incorrect date/time. The I2C protocol works
   for basic transactions but the clock values aren't correct. The d75fd54-style I2C
   (both SCL/SDA from Port F DR) may not properly handle all CyOS read sequences.
   Needs investigation.
-- **Fn+letter numbers show letter first**: Pressing a number key (e.g., "1" = Fn+Q)
-  briefly shows the letter ("q") before the number ("1"). Both keys are set
-  simultaneously in SwingRenderer but CyOS may scan the letter column before Fn.
+- **Fn+number keys intermittent**: Number keys (Fn+letter combos) work ~80-90% of the
+  time but occasionally produce the letter instead. SwingRenderer uses queue-based
+  delayed Fn+letter injection (Fn pressed first, letter delayed 3-4 frames) but fast
+  typing can still race with CyOS's DMA keyboard scan. Root cause is thread
+  synchronization: Swing EDT modifies key matrix while emulation thread reads it.
+  Performance is not the bottleneck (~4ms/frame, 24% of budget).
 
 ## Current Status
 - CyOS fully boots to interactive "Congratulations!" welcome screen (or desktop with NVRAM)
-- Keyboard input works (letters, navigation keys, Fn+letter for numbers with minor timing issue)
+- Keyboard input works (letters, navigation keys, Fn+letter for numbers)
+- Minimum key hold time (3 frames) prevents fast key presses from being missed
 - RTC I2C protocol handles basic transactions; clock display shows wrong values (known issue)
 - LCD renders full CyOS UI with menus and text input
 - Timer8 and Timer16 interrupts drive the OS scheduler
@@ -355,7 +360,8 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - App loading via CFS filesystem (--app wraps .app files in proper CFS block format)
 - Persistent NVRAM (--nvram saves/restores external RAM between sessions)
 - Speaker audio output (1-bit, Port 1 bit 3 / TIOCB1)
-- VRAM CRC32 hash in STATUS log for automated boot phase detection
+- VRAM CRC32 hash and frame timing in STATUS log
+- Frame time ~4ms (24% of 16.7ms budget), JIT-optimized after first second
 - No unimplemented opcodes in the current execution path
 
 ## Keyboard Matrix

@@ -131,6 +131,8 @@ public class CybikoXtreme {
 
         System.err.println("=== Starting execution ===");
         long frameDeadline = System.nanoTime() + NANOS_PER_FRAME;
+        long frameTotalNanos = 0;  // Accumulated frame work time for averaging
+        int frameTimingSamples = 0;
 
         while (running && totalSteps < maxSteps) {
             // Execute one frame's worth of cycles
@@ -149,6 +151,7 @@ public class CybikoXtreme {
             boolean t16_4_run = timer16[4].isRunning();
             boolean t16_5_run = timer16[5].isRunning();
 
+            long frameStartNanos = System.nanoTime();
             for (int i = 0; i < cycleBudget; i++) {
                 // Tick only active timers (even when CPU is halted/sleeping)
                 if (t8_0_run) timer8_0.tick();
@@ -189,17 +192,25 @@ public class CybikoXtreme {
 
             frameCounter++;
 
+            // Track frame work time
+            frameTotalNanos += System.nanoTime() - frameStartNanos;
+            frameTimingSamples++;
+
             // Periodic status (every ~1 second at 60fps)
             if (frameCounter % 60 == 0) {
                 int isrCb = bus.read32(0xFFECA8);
                 CRC32 crc = new CRC32();
                 crc.update(lcd.getVram());
                 long vramHash = crc.getValue();
-                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b CCR=0x%02X pending=%d isr=0x%06X vram=%08X t8_0[tcr=%02X cnt=%02X cora=%02X irqs=%d] t8_1[tcr=%02X cnt=%02X cora=%02X irqs=%d]%n",
-                    frameCounter, totalSteps, cpu.getPC(), cpu.isHalted(),
-                    cpu.getCCR(), cpu.getPendingInterruptCount(), isrCb, vramHash,
-                    timer8_0.getTcr(), timer8_0.getTcnt(), timer8_0.getTcora(), timer8_0.getInterruptCount(),
-                    timer8_1.getTcr(), timer8_1.getTcnt(), timer8_1.getTcora(), timer8_1.getInterruptCount());
+                double avgFrameMs = (frameTimingSamples > 0) ? (frameTotalNanos / (double) frameTimingSamples) / 1_000_000.0 : 0;
+                double usagePct = (avgFrameMs / 16.67) * 100;
+                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b vram=%08X frame=%.1fms(%.0f%%) t8_0[tcr=%02X irqs=%d] t8_1[tcr=%02X irqs=%d]%n",
+                    frameCounter, totalSteps, cpu.getPC(), cpu.isHalted(), vramHash,
+                    avgFrameMs, usagePct,
+                    timer8_0.getTcr(), timer8_0.getInterruptCount(),
+                    timer8_1.getTcr(), timer8_1.getInterruptCount());
+                frameTotalNanos = 0;
+                frameTimingSamples = 0;
             }
 
             // Precise frame rate limiting (if we have a display)
