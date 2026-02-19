@@ -46,7 +46,7 @@ public class PCF8593Rtc {
     private long nanosAccum = 0;
 
     private int debugCount = 0;
-    private static final int DEBUG_LIMIT = 30;
+    private static final int DEBUG_LIMIT = 50;
 
     public PCF8593Rtc() {
         // Initialize with current system time
@@ -58,6 +58,14 @@ public class PCF8593Rtc {
         data[4] = toBcd(now.getHour());
         data[5] = (((now.getYear() % 4)) << 6) | toBcd(now.getDayOfMonth());
         data[6] = toBcd(now.getMonthValue());
+        // Register 7: year base for CyOS year calculation.
+        // CyOS reads this as BCD, adds 100, then combines with the 2-bit year
+        // in register 5 to compute the full year since 1900.
+        // Formula: data[7] = toBcd(year - 2000) for years >= 2000.
+        int yearOffset = now.getYear() - 2000;
+        if (yearOffset >= 0 && yearOffset <= 99) {
+            data[7] = toBcd(yearOffset);
+        }
         lastTickNanos = System.nanoTime();
     }
 
@@ -202,21 +210,17 @@ public class PCF8593Rtc {
         pinScl = state;
     }
 
-    /** Set SDA line state (from Port F write bit 6, INVERTED). */
+    /**
+     * Set SDA line state (from Port F output, already inverted by caller).
+     * Matches MAME pcf8593.cpp sda_w() exactly: simple pinSda transition check.
+     */
     public void sda_w(boolean high) {
         int state = high ? 1 : 0;
 
-        // Check for START/STOP conditions while SCL is high.
-        // Use combined open-drain bus SDA state: SDA is HIGH only when BOTH
-        // host and RTC release it. This prevents false STOP after ACK: the RTC
-        // holds SDA LOW (inp=0) for ACK, so even if the host releases SDA,
-        // the bus stays LOW and no STOP is detected.
+        // Check for START/STOP conditions while SCL is high (matches MAME)
         if (pinScl != 0) {
-            boolean oldBus = (pinSda != 0) && (inp != 0);
-            boolean newBus = (state != 0) && (inp != 0);
-
-            // START: bus SDA high -> low while SCL high
-            if (!newBus && oldBus) {
+            // START: SDA high -> low while SCL high
+            if (state == 0 && pinSda != 0) {
                 if (debugCount++ < DEBUG_LIMIT) {
                     System.err.printf("[I2C] START%n");
                 }
@@ -225,13 +229,13 @@ public class PCF8593Rtc {
                 dataRecvIndex = 0;
                 clearBufferRx();
             }
-            // STOP: bus SDA low -> high while SCL high
-            if (newBus && !oldBus) {
+            // STOP: SDA low -> high while SCL high
+            if (state != 0 && pinSda == 0) {
                 if (debugCount++ < DEBUG_LIMIT) {
                     System.err.printf("[I2C] STOP%n");
                 }
                 active = false;
-                inp = 1; // Release SDA on stop
+                inp = 1; // Release SDA on stop (must be HIGH/idle for CyOS boot)
             }
         }
         pinSda = state;

@@ -126,7 +126,7 @@ public class CybikoXtreme {
     private void run() {
         int frameCounter = 0;
         long totalSteps = 0;
-        long maxSteps = 1_000_000_000L; // ~54 seconds of emulated time at 18MHz
+        long maxSteps = 5_000_000_000L; // ~270 seconds of emulated time at 18MHz
 
         System.err.println("=== Starting execution ===");
         long frameDeadline = System.nanoTime() + NANOS_PER_FRAME;
