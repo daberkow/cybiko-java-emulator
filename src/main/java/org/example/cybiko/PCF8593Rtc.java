@@ -153,18 +153,23 @@ public class PCF8593Rtc {
                             }
                         }
                         // First byte 0xA2 + second byte = set register position
+                        // Store full 8-bit value (matching MAME). CyOS sends 0x80+
+                        // for alarm registers; only lower 4 bits address real regs.
                         if (dataRecv[0] == 0xA2 && dataRecvIndex == 1) {
-                            pos = dataRecv[1] & 0x0F;
+                            pos = dataRecv[1] & 0xFF;
                             if (debugCount < DEBUG_LIMIT) {
-                                System.err.printf("[I2C] Register pointer = %d%n", pos);
+                                System.err.printf("[I2C] Register pointer = 0x%02X%n", pos);
                             }
                         }
                         // 0xA2 + pos + data bytes = write registers
                         if (dataRecv[0] == 0xA2 && dataRecvIndex >= 2) {
-                            int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0x0F;
-                            data[rtcPos] = received;
+                            int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0xFF;
+                            if (rtcPos < data.length) {
+                                data[rtcPos] = received;
+                            }
                             if (debugCount < DEBUG_LIMIT) {
-                                System.err.printf("[I2C] Write reg[%d] = 0x%02X%n", rtcPos, received);
+                                System.err.printf("[I2C] Write reg[0x%02X] = 0x%02X%s%n",
+                                    rtcPos, received, rtcPos >= data.length ? " (ignored)" : "");
                             }
                         }
                         bits = 0;
@@ -173,12 +178,13 @@ public class PCF8593Rtc {
                 }
                 case SEND -> {
                     // RTC -> HOST: clock out a bit
-                    inp = (data[pos] >> (7 - bits)) & 1;
+                    int sendByte = (pos < data.length) ? data[pos] : 0;
+                    inp = (sendByte >> (7 - bits)) & 1;
                     bits++;
                     // After 8 data bits + ACK
                     if (bits > 8) {
                         if (debugCount < DEBUG_LIMIT) {
-                            System.err.printf("[I2C] Sent byte 0x%02X from pos=%d%n", data[pos], pos);
+                            System.err.printf("[I2C] Sent byte 0x%02X from pos=0x%02X%n", sendByte, pos);
                         }
                         // Check master ACK/NACK
                         if (pinSda != 0) {
@@ -188,7 +194,7 @@ public class PCF8593Rtc {
                             clearBufferRx();
                         }
                         bits = 0;
-                        pos = (pos + 1) & 0x0F;
+                        pos = (pos + 1) & 0xFF; // uint8_t wrap (matches MAME)
                     }
                 }
             }
