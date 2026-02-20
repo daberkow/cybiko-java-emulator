@@ -11,6 +11,9 @@ plugins {
     id 'idea'
 }
 
+// Read version from VERSION file, with optional build number from CI
+version = file('VERSION').text.trim() + (System.getenv('BUILD_NUMBER') ? ".${System.getenv('BUILD_NUMBER')}" : '')
+
 repositories {
     // Use Maven Central for resolving dependencies.
     mavenCentral()
