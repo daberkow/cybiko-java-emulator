@@ -21,7 +21,7 @@ class BootIntegrationTest {
         assumeTrue(Files.exists(BOOT_ROM), "Boot ROM not found - skipping integration test");
         assumeTrue(Files.exists(FLASH_ROM), "Flash ROM not found - skipping integration test");
 
-        CybikoXtreme emu = new CybikoXtreme();
+        CybikoEmulator emu = new CybikoEmulator();
         emu.loadBootRom(BOOT_ROM);
         emu.loadFlashRom(FLASH_ROM);
         emu.setHeadless(true);

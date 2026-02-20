@@ -1,18 +1,23 @@
-# Cybiko Xtreme Emulator
+# Cybiko Emulator
 
 ## Project Overview
-Java emulator for the Cybiko Xtreme handheld computer. Learning project intended
-for eventual port to C.
+Java emulator for the Cybiko handheld computer family (Classic V1, V2, and Xtreme).
+Learning project intended for eventual port to C.
 
 ## Build & Run
 ```bash
 ./gradlew build
-./gradlew run --args="path/to/cyrom150.bin path/to/cyos_v1508.bin"
+./gradlew run --args="path/to/bootrom.bin path/to/flash.bin"
+# Xtreme (default):
+./gradlew run --args="cyrom150.bin cyos_v1508.bin"
+# Classic V1:
+./gradlew run --args="--machine v1 cyrom112.bin flash_v1246.bin"
 ```
 
 ### Options
 | Flag | Description |
 |------|-------------|
+| `--machine v1\|v2\|xt` | Select machine type (default: `xt`) |
 | `--headless` | Run without GUI window |
 | `--trace` | Enable instruction tracing (slow, verbose) |
 | `--mute` | Disable audio output |
@@ -46,12 +51,29 @@ The `--app` flag wraps raw `.app` files in proper CFS (Cybiko File System) block
 format before loading into RAM. Without `--nvram`, apps are loaded into a temporary
 CFS image that is lost on exit.
 
-ROM files: `src/main/resources/cybikoxt/cyrom150.bin` and `cyos_v1508.bin` (from MAME cybikoxt.zip).
+ROM files:
+- Xtreme: `src/main/resources/cybikoxt/cyrom150.bin` + `cyos_v1508.bin` (from MAME cybikoxt.zip)
+- Classic V1: `cyrom112.bin` + `flash_v1246.bin` (from MAME cybiko.zip)
 App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice.app`).
 
 ## Hardware Reference
 
-### CPU: Hitachi H8S/2323 @ 18.432 MHz
+### Supported Machines
+| Feature | V1 (Classic) | V2 | XT (Xtreme) |
+|---------|-------------|----|-------------|
+| CPU | H8S/2241 @ 11.06 MHz | H8S/2246 @ 11.06 MHz | H8S/2323 @ 18.43 MHz |
+| On-chip RAM | 4KB @ 0xFFEC00 | 8KB @ 0xFFDC00 | 8KB @ 0xFFDC00 |
+| External RAM | 512KB @ 0x200000 | 256KB @ 0x200000 | 2MB @ 0x400000 |
+| LCD address | 0x600000 | 0x600000 | 0x100000 |
+| Flash | SPI (AT45DB041, 528KB) | 256KB @ 0x100000 | 512KB @ 0x600000 |
+| Timer16 channels | 3 | 3 | 6 |
+| DMA | No | No | 4 channels |
+| Boot ROM mirror | 32KB only | 32KB only | Mirrored to 0x3FFFF |
+| Keyboard | 9 columns, 8-bit | 9 columns, 8-bit | 15 columns, 16-bit |
+| RTC SDA pin | Port F bit 0 | Port F bit 0 | Port F bit 6 |
+| Power status | Port 1: 0x08 | Port 1: 0x08 | Port A: 0xC0 |
+
+### CPU: Hitachi H8S/2000 Series
 - H8S/2000 series (H8/300 base + H8/300H 32-bit + H8S extensions)
 - 8x 32-bit general purpose registers (ER0-ER7)
   - Upper 16-bit halves: E0-E7
@@ -62,7 +84,7 @@ App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice
 - EXR: Extended control register (interrupt/trace)
 - Big-endian byte order
 
-### Memory Map
+### Memory Map (Xtreme)
 | Address Range     | Size  | Device                          |
 |-------------------|-------|---------------------------------|
 | 0x000000-0x007FFF | 32KB  | Boot ROM (mirrored to 0x03FFFF) |
@@ -72,6 +94,16 @@ App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice
 | 0x600000-0x67FFFF | 512KB | Flash ROM (SST 39VF400A)        |
 | 0xE00000-0xEFFFFF | 1MB   | Keyboard matrix                 |
 | 0xFFDC00-0xFFFFFF | ~9KB  | On-chip RAM & I/O registers     |
+
+### Memory Map (V1 Classic)
+| Address Range     | Size  | Device                          |
+|-------------------|-------|---------------------------------|
+| 0x000000-0x007FFF | 32KB  | Boot ROM (no mirroring)         |
+| 0x200000-0x27FFFF | 512KB | External RAM                    |
+| 0x600000-0x600001 | 2B    | LCD controller (HD66421)        |
+| 0xE00000-0xEFFFFF | 1MB   | Keyboard matrix                 |
+| 0xFFEC00-0xFFFFFF | ~5KB  | On-chip RAM & I/O registers     |
+Flash ROM accessed via SPI (AT45DB041), not memory-mapped.
 
 ### LCD: Hitachi HD66421
 - 160x100 pixels, 2-bit grayscale (4 shades)
@@ -104,9 +136,18 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 | 7    | extD  | chain | /1024 | /4096  | chain  | extD  |
 
 ## Architecture
-- `CybikoXtreme` - Main emulator orchestrator with nanoTime-based frame timing (60fps).
-  Inner loop: 307,200 cycles/frame. Skips disabled timer ticks via per-frame isRunning() cache.
-- `AddressBus` - Memory-mapped I/O routing, DMA controller, keyboard matrix, speaker
+- `CybikoEmulator` - Main emulator orchestrator with nanoTime-based frame timing (60fps).
+  Takes `MachineConfig` to configure for V1/V2/XT. Inner loop: cycles/frame from config.
+  Skips disabled timer ticks via per-frame isRunning() cache.
+- `MachineConfig` - Machine configuration enum/data class for V1/V2/XT hardware variants.
+  Contains all machine-specific parameters: clock speed, memory sizes/addresses, timer
+  channels, DMA, SPI flash, RTC pin wiring, power status, keyboard columns.
+- `AddressBus` - Memory-mapped I/O routing, DMA controller (XT only), DTC simulation
+  (V1 SPI flash), keyboard matrix, speaker. Parameterized by MachineConfig for address
+  decoding and peripheral wiring.
+- `AT45DB041Flash` - SPI DataFlash emulation for V1 (2048 pages x 264 bytes = 528KB).
+  State machine: receives commands via SCI1, outputs page data. Commands: status read
+  (0x57), page read (0x52), program through buffer (0x82), buffer compare (0x60).
 - `H8SCpu` - CPU emulation core (~150 instructions). Pending interrupts use sorted int[]
   (not TreeSet) for low overhead. Debug profiling gated behind `debug` flag.
 - `H8STimer8` - 8-bit timer with compare match and overflow interrupts. Lean tick() path.
@@ -115,10 +156,13 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 - `HD66421Lcd` - LCD controller emulation. Reuses framebuffer array (no per-frame allocation).
 - `PCF8593Rtc` - Real-time clock with I2C bit-bang protocol (matches MAME pcf8593.cpp)
 - `CfsImage` - CFS (Cybiko File System) image builder/reader (matches MAME cybikoxt.cpp)
-- `SpeakerOutput` - 1-bit speaker audio via javax.sound.sampled (44.1kHz, 8-bit mono)
+- `SpeakerOutput` - 1-bit speaker audio via javax.sound.sampled (44.1kHz, 8-bit mono).
+  Takes clock rate from MachineConfig for correct sample timing.
 - `FrameBufferRenderer` / `SwingRenderer` / `ConsoleRenderer` - Display
-- `SwingRenderer` - Swing GUI with keyboard input. Bulk setRGB for rendering. Queue-based
-  Fn+letter injection for number keys. Minimum key hold time (3 frames) for all keys.
+- `SwingRenderer` - Swing GUI with keyboard input. Bulk setRGB for rendering. Takes
+  MachineConfig to select XT (15-col, Fn+letter numbers) or V1 (9-col, dedicated numbers)
+  keyboard layout. Queue-based Fn+letter injection for XT number keys. Minimum key hold
+  time (3 frames) for all keys.
 
 ## MAME Reference
 Hardware details derived from MAME source at `../mame/`.
@@ -178,7 +222,7 @@ Key registers the boot code accesses:
 - SSR bits: TDRE(7), RDRF(6), ORER(5), FER(4), PER(3), TEND(2), MPB(1), MPBT(0)
 - We return TDRE|TEND (0x84) as default to prevent infinite polling
 
-## Boot Sequence
+## Boot Sequence (Xtreme)
 1. Reset vector at 0x000000 points to ~0x004F96
 2. SP initialized to 0x00FFFADC (top of on-chip RAM area)
 3. Boot code zeros registers, copies data from ROM to on-chip RAM
@@ -200,6 +244,7 @@ Key registers the boot code accesses:
 The STATUS log includes a `vram=` field with CRC32 of the 4000-byte LCD VRAM.
 Use these hashes to identify boot progress in headless testing.
 
+### Xtreme Boot Phases
 | Phase | Frames | VRAM Hash  | Description | PC |
 |-------|--------|------------|-------------|-----|
 | 1 | ~1-60 | 65232E60 | Boot ROM: "Cybiko" logo top third | 0x0076B2 (boot ROM) |
@@ -211,6 +256,16 @@ Use these hashes to identify boot progress in headless testing.
 
 Phase 4 hash differs based on NVRAM state. The home screen (4b) alternates between
 two hashes as the clock colon blinks. All hashes confirmed by user on GUI display.
+
+### Classic V1 Boot Phases
+| Phase | Frames | VRAM Hash  | Description | PC |
+|-------|--------|------------|-------------|-----|
+| 1 | ~1-60 | CC3A6F3D | Boot ROM init (all black) | 0x002D34 (boot ROM) |
+| 2 | ~60-120 | 4ACC524E | SPI flash loading (dot pattern) | 0x20B756 (CyOS) |
+| 3 | ~240-300 | 5580FBFF | CyOS decompression / early init | 0x205CC2 |
+| 4 | ~360 | C0DBEF72 | Animated Cybiko logo (same as XT) | 0x219C8E (halted) |
+| 5 | ~480-540 | F48DA453 | CyOS initialization | 0x219C8E (halted) |
+| 6 | ~660+ | EFD624A8 | Final screen (CyOS UI) | 0x219C8E (halted) |
 
 ## Bugs Found & Fixed
 
@@ -337,6 +392,38 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   original bug was from a more aggressive optimization that cached per-cycle, not per-frame.
 - **Lesson**: Per-frame timer caching is safe; per-cycle would be too aggressive.
 
+### 12. Port F input pins missing pull-ups broke V1 SPI flash access
+- **Symptom**: V1 boot ROM stuck in tight loop at PC=0x002BC4, never accessing SPI flash.
+- **Root cause**: V1 boot ROM polls Port F input register (0xFFFF5E) bit 2 waiting for
+  AT45DB041 RDY/BUSY pin to go high (device ready). Our handler only returned the RTC
+  SDA bit (bit 0 for V1, bit 6 for XT), leaving all other bits at 0. On real hardware,
+  unconnected input pins with pull-up resistors read as 1.
+- **Fix**: Changed Port F input (0xFFFF5E) and Port F DR (0xFFFF6E) reads to return 0xFF
+  (all pull-ups high) with the RTC SDA bit conditionally cleared when SDA is low. This
+  correctly models: bit 2 = AT45DB041 RDY (always ready), bit 0/6 = RTC SDA state.
+- **Lesson**: Input port registers should default to pull-up state (0xFF) for unhandled
+  bits, not 0x00. Real hardware has pull-ups on most port pins.
+
+### 13. V1 CyOS stuck waiting for DTC-driven SPI flash transfer
+- **Symptom**: V1 CyOS loaded from SPI flash, displayed dot pattern on LCD, but stuck
+  at PC=0x206B82 polling a flag at 0x21F07A that never became non-zero.
+- **Root cause**: V1 CyOS uses the H8S DTC (Data Transfer Controller) for bulk SPI flash
+  reads. CyOS sets up a DTC register block at 0xFFFBD0 (source=SCI1 RDR, dest=RAM buffer,
+  count=page size), enables DTC via DTCER (0xFFFF34), then sets SCI1 SCR=0x50 (RE+RIE).
+  In real hardware, the SCI in clock-synchronous mode auto-generates clock when RE=1,
+  receiving bytes that trigger RXI interrupts, which the DTC handles automatically. Our
+  emulation had no DTC and no autonomous SCI receive, so no data was ever transferred.
+- **Fix**: Implemented lightweight DTC simulation in AddressBus. When SCI1 SCR is written
+  with RE+RIE (receive mode) or TE+TIE (transmit mode) and DTCER bit 1 is set:
+  1. Reads DTC register block from on-chip RAM at 0xFFFBD0
+  2. MRA=0x20 (receive): calls spiFlash.transfer(0xFF) for each byte, writes to dest
+  3. MRA=0x80 (transmit): reads from source buffer, calls spiFlash.transfer() for each
+  4. Clears DTC count and DTCER, fires SCI1 RXI interrupt (vector 85) for completion
+  This bypasses the need for full DTC emulation or autonomous SCI clock generation.
+- **Lesson**: The H8S DTC is simpler than DMA but still essential for V1 CyOS. It's
+  interrupt-triggered, using register info blocks in on-chip RAM. CyOS's SPI flash driver
+  uses polled SCI for command bytes, then switches to DTC for bulk data transfer.
+
 ## Known Issues
 - **RTC clock display wrong**: CyOS shows incorrect date/time. The I2C protocol works
   for basic transactions but the clock values aren't correct. The d75fd54-style I2C
@@ -350,13 +437,15 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   Performance is not the bottleneck (~4ms/frame, 24% of budget).
 
 ## Current Status
-- CyOS fully boots to interactive "Congratulations!" welcome screen (or desktop with NVRAM)
-- Keyboard input works (letters, navigation keys, Fn+letter for numbers)
+- Multi-machine support: V1 (Classic), V2, and XT (Xtreme) selectable via --machine flag
+- CyOS fully boots to interactive "Congratulations!" welcome screen (or desktop with NVRAM) on XT
+- V1 CyOS fully boots from SPI flash (AT45DB041 + DTC bulk transfer) to interactive UI
+- Keyboard input works (letters, navigation keys, Fn+letter for numbers on XT, dedicated numbers on V1)
 - Minimum key hold time (3 frames) prevents fast key presses from being missed
 - RTC I2C protocol handles basic transactions; clock display shows wrong values (known issue)
 - LCD renders full CyOS UI with menus and text input
 - Timer8 and Timer16 interrupts drive the OS scheduler
-- DMA controller handles keyboard matrix scans
+- DMA controller handles keyboard matrix scans (XT only; V1/V2 use direct reads)
 - App loading via CFS filesystem (--app wraps .app files in proper CFS block format)
 - Persistent NVRAM (--nvram saves/restores external RAM between sessions)
 - Speaker audio output (1-bit, Port 1 bit 3 / TIOCB1)
@@ -365,6 +454,8 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - No unimplemented opcodes in the current execution path
 
 ## Keyboard Matrix
+
+### Xtreme (15-column, 16-bit)
 The Cybiko Xtreme keyboard is a 15-column matrix at 0xE00000-0xEFFFFF.
 Column selection is **active-LOW** (confirmed from MAME `cybiko_m.cpp`):
 `!BIT(offset, i)` means column i is selected when bit i of the word offset is 0.
@@ -408,6 +499,31 @@ The Cybiko Xtreme has no dedicated number keys. Numbers are entered via:
 
 Fn key is always column 7, bit 0x8000.
 
+### Classic V1 (9-column, 8-bit)
+The V1 has a 9-column keyboard matrix with 8-bit reads and dedicated number keys.
+Column mapping from MAME INPUT_PORTS (A.0-A.8):
+
+| Column | Keys (bit positions in 8-bit read) |
+|--------|-------------------------------------|
+| 0 | F7(0), Esc(1), Del(2), Left(3), Q(4), A(5), Grave(6), Shift(7) |
+| 1 | F6(0), Up(1), Insert(2), 2(3), W(4), S(5), Z(6), Fn(7) |
+| 2 | F5(0), F3(1), Space(2), 3(3), E(4), D(5), X(6), Help(7) |
+| 3 | F4(0), 1(1), Tab(2), 4(3), R(4), F(5), C(6), [(7) |
+| 4 | Right(0), Down(1), Select(2), 5(3), T(4), G(5), V(6), ](7) |
+| 5 | F2(0), ;(1), Enter(2), 6(3), Y(4), H(5), B(6), \\(7) |
+| 6 | F1(0), /(1), BkSp(2), 7(3), U(4), J(5), N(6) |
+| 7 | -(0), .(1), 0(2), 8(3), I(4), K(5), M(6) |
+| 8 | '(0), =(1), 9(2), P(3), O(4), L(5), ,(6) |
+
+### AT45DB041 SPI Flash (V1 only)
+The V1 uses an AT45DB041 serial flash for CyOS storage instead of memory-mapped flash.
+- 2048 pages x 264 bytes = 540,672 bytes
+- Connected via SCI1 (SPI mode): TDR write sends byte, RDR read receives response
+- CS controlled by Port 3 DR bit 4 (active low)
+- Commands: status read (0x57), page read (0x52), program via buffer1 (0x82), compare (0x60)
+- Page address: `((cmd[1] & 0x0F) << 7) | ((cmd[2] & 0xFE) >> 1)`
+- Byte offset: `((cmd[2] & 0x01) << 8) | cmd[3]`
+
 ## DMA Controller
 Implemented in AddressBus. The H8S/2323 has a 4-channel DMA controller (DMAC).
 
@@ -429,13 +545,35 @@ Implemented in AddressBus. The H8S/2323 has a 4-channel DMA controller (DMAC).
 4. Enables DTE bit → DMA executes immediately
 5. CyOS reads keyboard state from on-chip RAM at 0xFFDC00+
 
+## DTC (Data Transfer Controller) - V1 Only
+The H8S/2241 has a DTC that handles interrupt-triggered data transfers using register
+info blocks in on-chip RAM. V1 CyOS uses DTC for bulk SPI flash reads via SCI1.
+
+### How CyOS Uses DTC for SPI Flash
+1. Sets up DTC register block at 0xFFFBD0 (10 bytes):
+   - Byte 0: MRA (0x20=receive from RDR to RAM, 0x80=transmit from RAM to TDR)
+   - Bytes 1-3: Source address low 3 bytes
+   - Bytes 4-7: Dest address (byte 4 forced to 0x00)
+   - Bytes 8-9: Transfer count (16-bit)
+2. Enables DTC via DTCER (0xFFFF34) bit 1
+3. Sets SCI1 SCR=0x50 (RE + RIE) for receive, or 0xA0 (TE + TIE) for transmit
+4. In real hardware: SCI auto-generates clock, each byte triggers RXI/TXI → DTC handles it
+5. When count reaches 0, DTC stops and normal interrupt handler runs (sets completion flag)
+
+### Emulation Approach
+Instead of full DTC emulation, AddressBus detects SCR writes with DTC enabled and
+executes the entire transfer immediately. This avoids modeling autonomous SCI clock
+generation and per-byte DTC dispatch.
+
 ## PCF8593 RTC (I2C Protocol)
 Real-time clock connected via I2C bit-bang on Port F.
 
 ### Port F Pin Wiring
-- **SCL**: Port F DR (0xFFFF6E) bit 1 (0x02), direct polarity
-- **SDA write**: Port F DR (0xFFFF6E) bit 6 (0x40), **inverted** (0x40=SDA low, 0x00=SDA high)
-- **SDA readback**: Port F input register (0xFFFF5E) bit 6, NOT inverted
+**Xtreme**: SCL = bit 1 (0x02), SDA write = bit 6 (0x40, inverted), SDA read = bit 6
+**V1/V2**: SCL = bit 1 (0x02), SDA write = bit 0 (0x01, inverted), SDA read = bit 0
+- **SCL**: Port F DR (0xFFFF6E), direct polarity
+- **SDA write**: Port F DR (0xFFFF6E), **inverted** (bit set = SDA low)
+- **SDA readback**: Port F input register (0xFFFF5E), NOT inverted
 - Both SCL and SDA are triggered from the same Port F DR write (d75fd54 approach).
   An attempt to split them (SCL from DR, SDA from DDR per MAME's `#if 0` block)
   broke CyOS boot and was reverted (see bug #10).

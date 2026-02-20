@@ -12,31 +12,26 @@ public class SwingRenderer implements FrameBufferRenderer {
 
     private final JFrame frame;
     private final BufferedImage image;
-    private final int[] rgbBuffer; // Pre-allocated packed RGB buffer for bulk setRGB
+    private final int[] rgbBuffer;
     private final JPanel panel;
-    private AddressBus bus; // Set after construction to receive key events
+    private final MachineConfig config;
+    private AddressBus bus;
 
-    // Fn+letter combo state for number key input.
-    // Fn is "sticky": held as long as number keys are active, released after
-    // an idle period. Every number key letter is delayed by a few frames so
-    // CyOS sees Fn as established before the letter appears in the matrix.
-    private static final int FN_FIRST_DELAY = 4;    // Frames to delay first letter (Fn must register)
-    private static final int FN_NEXT_DELAY = 3;     // Frames to delay subsequent letters (Fn already held)
-    private static final int FN_RELEASE_DELAY = 10;  // Frames to keep Fn after last number released
-    private boolean fnHeld = false;           // Whether we're currently holding Fn
-    private int fnHeldCount = 0;              // Number of active number keys holding Fn
-    private int fnReleaseCountdown = 0;       // Frames until Fn is released (0=not pending)
+    // Fn+letter combo state for number key input (XT only).
+    private static final int FN_FIRST_DELAY = 4;
+    private static final int FN_NEXT_DELAY = 3;
+    private static final int FN_RELEASE_DELAY = 10;
+    private boolean fnHeld = false;
+    private int fnHeldCount = 0;
+    private int fnReleaseCountdown = 0;
 
-    // Queue of pending letter key presses (for rapid number typing)
     private static final int MAX_PENDING_LETTERS = 8;
     private final int[] pendingCols = new int[MAX_PENDING_LETTERS];
     private final int[] pendingBits = new int[MAX_PENDING_LETTERS];
     private final int[] pendingDelays = new int[MAX_PENDING_LETTERS];
     private int pendingCount = 0;
 
-    // Minimum key hold time: ensures every keypress stays in the matrix long
-    // enough for CyOS to detect it via DMA scan (at least 2 frames = ~33ms).
-    // Without this, fast typists can press+release between two scans.
+    // Minimum key hold time
     private static final int MIN_HOLD_FRAMES = 3;
     private static final int MAX_HELD_KEYS = 16;
     private final int[] heldCols = new int[MAX_HELD_KEYS];
@@ -45,21 +40,8 @@ public class SwingRenderer implements FrameBufferRenderer {
     private final boolean[] heldReleasePending = new boolean[MAX_HELD_KEYS];
     private int heldCount = 0;
 
-    // Cybiko Xtreme keyboard matrix mapping (from MAME cybikoxt INPUT_PORTS):
-    // Each entry: [hostKeyCode] -> {column, bitmask}
-    // Column A.0: F7, M, K, I, O, L
-    // Column A.1: F6, G, B, N, H, Y, U, J
-    // Column A.2: F5, D, C, V, F, R, T
-    // Column A.3: F4, Q, A, Z, X, S, W, E
-    // Column A.4: F3, Enter, Select(Home), Space
-    // Column A.5: F2, Tab, Del, As(Insert), Esc
-    // Column A.6: F1, Up, Right, Down, Left
-    // Column A.7: Fn(LCtrl)
-    // Column A.8: Shift
-    // Column A.13: Help(End), Period, P
-    // Column A.14: On/Off(F8)
-
-    public SwingRenderer() {
+    public SwingRenderer(MachineConfig config) {
+        this.config = config;
         int w = HD66421Lcd.WIDTH;
         int h = HD66421Lcd.HEIGHT;
         image = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
@@ -78,7 +60,7 @@ public class SwingRenderer implements FrameBufferRenderer {
         panel.setPreferredSize(new Dimension(w * SCALE, h * SCALE));
         panel.setBackground(Color.BLACK);
 
-        frame = new JFrame("Cybiko Xtreme Emulator");
+        frame = new JFrame(config.name + " Emulator");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.add(panel);
         frame.pack();
@@ -86,7 +68,6 @@ public class SwingRenderer implements FrameBufferRenderer {
         frame.setResizable(false);
         frame.setVisible(true);
 
-        // Add keyboard listener
         frame.addKeyListener(new KeyListener() {
             @Override public void keyTyped(KeyEvent e) {}
             @Override public void keyPressed(KeyEvent e) { handleKey(e.getKeyCode(), true); }
@@ -96,28 +77,44 @@ public class SwingRenderer implements FrameBufferRenderer {
         frame.requestFocus();
     }
 
+    /** Backward-compatible constructor (XT). */
+    public SwingRenderer() {
+        this(MachineConfig.forType(MachineConfig.MachineType.XT));
+    }
+
     public void setBus(AddressBus bus) { this.bus = bus; }
 
     private void handleKey(int keyCode, boolean pressed) {
         if (bus == null) return;
 
-        // Number keys: simulate Fn + letter combo (Cybiko has no dedicated number keys)
-        // Fn+Q=1, Fn+W=2, Fn+E=3, Fn+R=4, Fn+T=5, Fn+Y=6, Fn+U=7, Fn+I=8, Fn+O=9, Fn+P=0
+        if (config.type == MachineConfig.MachineType.XT) {
+            handleKeyXT(keyCode, pressed);
+        } else {
+            handleKeyV1(keyCode, pressed);
+        }
+    }
+
+    // ========================================================================
+    // Cybiko Xtreme keyboard (15 columns x 16-bit, Fn+letter for numbers)
+    // ========================================================================
+    private void handleKeyXT(int keyCode, boolean pressed) {
+        // Number keys: Fn + letter combos
         switch (keyCode) {
-            case KeyEvent.VK_1 -> { setFnLetter(3, 0x0002, pressed); return; } // Fn+Q
-            case KeyEvent.VK_2 -> { setFnLetter(3, 0x0040, pressed); return; } // Fn+W
-            case KeyEvent.VK_3 -> { setFnLetter(3, 0x0080, pressed); return; } // Fn+E
-            case KeyEvent.VK_4 -> { setFnLetter(2, 0x2000, pressed); return; } // Fn+R
-            case KeyEvent.VK_5 -> { setFnLetter(2, 0x4000, pressed); return; } // Fn+T
-            case KeyEvent.VK_6 -> { setFnLetter(1, 0x0020, pressed); return; } // Fn+Y
-            case KeyEvent.VK_7 -> { setFnLetter(1, 0x0040, pressed); return; } // Fn+U
-            case KeyEvent.VK_8 -> { setFnLetter(0, 0x1000, pressed); return; } // Fn+I
-            case KeyEvent.VK_9 -> { setFnLetter(0, 0x2000, pressed); return; } // Fn+O
-            case KeyEvent.VK_0 -> { setFnLetter(13, 0x0010, pressed); return; } // Fn+P
+            case KeyEvent.VK_1 -> { setFnLetter(3, 0x0002, pressed); return; }
+            case KeyEvent.VK_2 -> { setFnLetter(3, 0x0040, pressed); return; }
+            case KeyEvent.VK_3 -> { setFnLetter(3, 0x0080, pressed); return; }
+            case KeyEvent.VK_4 -> { setFnLetter(2, 0x2000, pressed); return; }
+            case KeyEvent.VK_5 -> { setFnLetter(2, 0x4000, pressed); return; }
+            case KeyEvent.VK_6 -> { setFnLetter(1, 0x0020, pressed); return; }
+            case KeyEvent.VK_7 -> { setFnLetter(1, 0x0040, pressed); return; }
+            case KeyEvent.VK_8 -> { setFnLetter(0, 0x1000, pressed); return; }
+            case KeyEvent.VK_9 -> { setFnLetter(0, 0x2000, pressed); return; }
+            case KeyEvent.VK_0 -> { setFnLetter(13, 0x0010, pressed); return; }
         }
 
         int col = -1, bit = 0;
         switch (keyCode) {
+            // XT keyboard matrix (from MAME cybikoxt INPUT_PORTS)
             // Column A.0
             case KeyEvent.VK_F7     -> { col = 0; bit = 0x0001; }
             case KeyEvent.VK_M      -> { col = 0; bit = 0x0100; }
@@ -185,18 +182,111 @@ public class SwingRenderer implements FrameBufferRenderer {
         }
     }
 
-    /**
-     * Press/release a key with minimum hold time enforcement.
-     * On press: set key in matrix and start hold timer.
-     * On release: if hold timer hasn't expired, defer the release.
-     */
+    // ========================================================================
+    // Cybiko V1/V2 keyboard (9 columns x 8-bit, dedicated number keys)
+    // From MAME cybiko INPUT_PORTS (A.0-A.8)
+    // ========================================================================
+    private void handleKeyV1(int keyCode, boolean pressed) {
+        int col = -1, bit = 0;
+        switch (keyCode) {
+            // Column 0 (A.0): F7, Esc, Del, Left, Q, A, `, Shift
+            case KeyEvent.VK_F7     -> { col = 0; bit = 0x01; }
+            case KeyEvent.VK_ESCAPE -> { col = 0; bit = 0x02; }
+            case KeyEvent.VK_DELETE, KeyEvent.VK_BACK_SPACE
+                                    -> { col = 0; bit = 0x04; }
+            case KeyEvent.VK_LEFT   -> { col = 0; bit = 0x08; }
+            case KeyEvent.VK_Q      -> { col = 0; bit = 0x10; }
+            case KeyEvent.VK_A      -> { col = 0; bit = 0x20; }
+            case KeyEvent.VK_BACK_QUOTE -> { col = 0; bit = 0x40; }
+            case KeyEvent.VK_SHIFT  -> { col = 0; bit = 0x80; }
+
+            // Column 1 (A.1): F6, Up, As/Insert, 2, W, S, Z, Fn
+            case KeyEvent.VK_F6     -> { col = 1; bit = 0x01; }
+            case KeyEvent.VK_UP     -> { col = 1; bit = 0x02; }
+            case KeyEvent.VK_INSERT -> { col = 1; bit = 0x04; }
+            case KeyEvent.VK_2      -> { col = 1; bit = 0x08; }
+            case KeyEvent.VK_W      -> { col = 1; bit = 0x10; }
+            case KeyEvent.VK_S      -> { col = 1; bit = 0x20; }
+            case KeyEvent.VK_Z      -> { col = 1; bit = 0x40; }
+            case KeyEvent.VK_CONTROL -> { col = 1; bit = 0x80; } // Fn
+
+            // Column 2 (A.2): F5, F3, Space, 3, E, D, X, Help/End
+            case KeyEvent.VK_F5     -> { col = 2; bit = 0x01; }
+            case KeyEvent.VK_F3     -> { col = 2; bit = 0x02; }
+            case KeyEvent.VK_SPACE  -> { col = 2; bit = 0x04; }
+            case KeyEvent.VK_3      -> { col = 2; bit = 0x08; }
+            case KeyEvent.VK_E      -> { col = 2; bit = 0x10; }
+            case KeyEvent.VK_D      -> { col = 2; bit = 0x20; }
+            case KeyEvent.VK_X      -> { col = 2; bit = 0x40; }
+            case KeyEvent.VK_END    -> { col = 2; bit = 0x80; } // Help
+
+            // Column 3 (A.3): F4, 1, Tab, 4, R, F, C, [
+            case KeyEvent.VK_F4     -> { col = 3; bit = 0x01; }
+            case KeyEvent.VK_1      -> { col = 3; bit = 0x02; }
+            case KeyEvent.VK_TAB    -> { col = 3; bit = 0x04; }
+            case KeyEvent.VK_4      -> { col = 3; bit = 0x08; }
+            case KeyEvent.VK_R      -> { col = 3; bit = 0x10; }
+            case KeyEvent.VK_F      -> { col = 3; bit = 0x20; }
+            case KeyEvent.VK_C      -> { col = 3; bit = 0x40; }
+            case KeyEvent.VK_OPEN_BRACKET -> { col = 3; bit = 0x80; }
+
+            // Column 4 (A.4): Right, Down, Select/Home, 5, T, G, V, ]
+            case KeyEvent.VK_RIGHT  -> { col = 4; bit = 0x01; }
+            case KeyEvent.VK_DOWN   -> { col = 4; bit = 0x02; }
+            case KeyEvent.VK_HOME   -> { col = 4; bit = 0x04; } // Select
+            case KeyEvent.VK_5      -> { col = 4; bit = 0x08; }
+            case KeyEvent.VK_T      -> { col = 4; bit = 0x10; }
+            case KeyEvent.VK_G      -> { col = 4; bit = 0x20; }
+            case KeyEvent.VK_V      -> { col = 4; bit = 0x40; }
+            case KeyEvent.VK_CLOSE_BRACKET -> { col = 4; bit = 0x80; }
+
+            // Column 5 (A.5): F2, ;, Enter, 6, Y, H, B, backslash
+            case KeyEvent.VK_F2     -> { col = 5; bit = 0x01; }
+            case KeyEvent.VK_SEMICOLON -> { col = 5; bit = 0x02; }
+            case KeyEvent.VK_ENTER  -> { col = 5; bit = 0x04; }
+            case KeyEvent.VK_6      -> { col = 5; bit = 0x08; }
+            case KeyEvent.VK_Y      -> { col = 5; bit = 0x10; }
+            case KeyEvent.VK_H      -> { col = 5; bit = 0x20; }
+            case KeyEvent.VK_B      -> { col = 5; bit = 0x40; }
+            case KeyEvent.VK_BACK_SLASH -> { col = 5; bit = 0x80; }
+
+            // Column 6 (A.6): F1, /, BkSp, 7, U, J, N
+            case KeyEvent.VK_F1     -> { col = 6; bit = 0x01; }
+            case KeyEvent.VK_SLASH  -> { col = 6; bit = 0x02; }
+            // Note: BkSp handled above as Delete in column 0 for V1
+            case KeyEvent.VK_7      -> { col = 6; bit = 0x08; }
+            case KeyEvent.VK_U      -> { col = 6; bit = 0x10; }
+            case KeyEvent.VK_J      -> { col = 6; bit = 0x20; }
+            case KeyEvent.VK_N      -> { col = 6; bit = 0x40; }
+
+            // Column 7 (A.7): -, ., 0, 8, I, K, M
+            case KeyEvent.VK_MINUS  -> { col = 7; bit = 0x01; }
+            case KeyEvent.VK_PERIOD -> { col = 7; bit = 0x02; }
+            case KeyEvent.VK_0      -> { col = 7; bit = 0x04; }
+            case KeyEvent.VK_8      -> { col = 7; bit = 0x08; }
+            case KeyEvent.VK_I      -> { col = 7; bit = 0x10; }
+            case KeyEvent.VK_K      -> { col = 7; bit = 0x20; }
+            case KeyEvent.VK_M      -> { col = 7; bit = 0x40; }
+
+            // Column 8 (A.8): ', =, 9, P, O, L, ,
+            case KeyEvent.VK_QUOTE  -> { col = 8; bit = 0x01; }
+            case KeyEvent.VK_EQUALS -> { col = 8; bit = 0x02; }
+            case KeyEvent.VK_9      -> { col = 8; bit = 0x04; }
+            case KeyEvent.VK_P      -> { col = 8; bit = 0x08; }
+            case KeyEvent.VK_O      -> { col = 8; bit = 0x10; }
+            case KeyEvent.VK_L      -> { col = 8; bit = 0x20; }
+            case KeyEvent.VK_COMMA  -> { col = 8; bit = 0x40; }
+        }
+        if (col >= 0) {
+            pressKeyWithHold(col, bit, pressed);
+        }
+    }
+
     private void pressKeyWithHold(int col, int bit, boolean pressed) {
         if (pressed) {
             bus.setKeyState(col, bit, true);
-            // Track this key for minimum hold enforcement
             int idx = findHeldKey(col, bit);
             if (idx >= 0) {
-                // Already tracked (re-press before hold expired)
                 heldFramesLeft[idx] = MIN_HOLD_FRAMES;
                 heldReleasePending[idx] = false;
             } else if (heldCount < MAX_HELD_KEYS) {
@@ -209,10 +299,8 @@ public class SwingRenderer implements FrameBufferRenderer {
         } else {
             int idx = findHeldKey(col, bit);
             if (idx >= 0 && heldFramesLeft[idx] > 0) {
-                // Hold timer still active - defer the release
                 heldReleasePending[idx] = true;
             } else {
-                // Hold timer expired or not tracked - release immediately
                 bus.setKeyState(col, bit, false);
                 if (idx >= 0) removeHeldKey(idx);
             }
@@ -236,33 +324,22 @@ public class SwingRenderer implements FrameBufferRenderer {
         }
     }
 
-    /**
-     * Simulate Fn + letter key press for number key input.
-     * Fn is "sticky" - stays held while any number keys are active.
-     * Every letter is queued with a short delay so CyOS always sees Fn
-     * established in the matrix before the letter appears.
-     */
+    /** Fn + letter combo for XT number keys. */
     private void setFnLetter(int letterCol, int letterBit, boolean pressed) {
         if (pressed) {
             fnHeldCount++;
-            fnReleaseCountdown = 0; // Cancel any pending Fn release
-
+            fnReleaseCountdown = 0;
             if (!fnHeld) {
-                // First number key: set Fn now, longer delay for letter
                 bus.setKeyState(7, 0x8000, true);
                 fnHeld = true;
                 queuePendingLetter(letterCol, letterBit, FN_FIRST_DELAY);
             } else {
-                // Fn already held: shorter delay (just needs 1 scan cycle gap)
                 queuePendingLetter(letterCol, letterBit, FN_NEXT_DELAY);
             }
         } else {
-            // Release the letter key immediately
             bus.setKeyState(letterCol, letterBit, false);
             removePendingLetter(letterCol, letterBit);
             fnHeldCount = Math.max(0, fnHeldCount - 1);
-
-            // When all number keys released, start Fn release countdown
             if (fnHeldCount == 0 && fnHeld) {
                 fnReleaseCountdown = FN_RELEASE_DELAY;
             }
@@ -270,7 +347,6 @@ public class SwingRenderer implements FrameBufferRenderer {
     }
 
     private void queuePendingLetter(int col, int bit, int delay) {
-        // Replace existing entry for same key, or add new
         for (int i = 0; i < pendingCount; i++) {
             if (pendingCols[i] == col && pendingBits[i] == bit) {
                 pendingDelays[i] = delay;
@@ -302,32 +378,31 @@ public class SwingRenderer implements FrameBufferRenderer {
     @Override
     public void render(int[] pixels, int width, int height) {
         if (bus != null) {
-            // Process minimum hold timers - release keys whose hold time expired
+            // Process minimum hold timers
             for (int i = 0; i < heldCount; i++) {
                 if (heldFramesLeft[i] > 0) heldFramesLeft[i]--;
                 if (heldFramesLeft[i] <= 0 && heldReleasePending[i]) {
                     bus.setKeyState(heldCols[i], heldBits[i], false);
                     removeHeldKey(i);
-                    i--; // re-check this index
+                    i--;
                 }
             }
 
-            // Process queued Fn+letter presses (each with its own countdown)
+            // Process queued Fn+letter presses (XT only)
             for (int i = 0; i < pendingCount; i++) {
                 if (--pendingDelays[i] <= 0) {
                     bus.setKeyState(pendingCols[i], pendingBits[i], true);
-                    // Remove from queue (swap with last)
                     pendingCount--;
                     if (i < pendingCount) {
                         pendingCols[i] = pendingCols[pendingCount];
                         pendingBits[i] = pendingBits[pendingCount];
                         pendingDelays[i] = pendingDelays[pendingCount];
                     }
-                    i--; // re-check this index
+                    i--;
                 }
             }
 
-            // Delayed Fn release (keeps Fn held between consecutive numbers)
+            // Delayed Fn release (XT only)
             if (fnReleaseCountdown > 0) {
                 fnReleaseCountdown--;
                 if (fnReleaseCountdown == 0 && fnHeld) {
@@ -341,7 +416,6 @@ public class SwingRenderer implements FrameBufferRenderer {
         for (int i = 0; i < len; i++) {
             int gray = pixels[i];
             if (gray < 0) gray = 0; else if (gray > 255) gray = 255;
-            // Greenish LCD tint (pre-multiplied constants: 180/255≈0.706, 210/255≈0.824, 160/255≈0.627)
             rgbBuffer[i] = (((gray * 180) >> 8) << 16) | (((gray * 210) >> 8) << 8) | ((gray * 160) >> 8);
         }
         image.setRGB(0, 0, width, height, rgbBuffer, 0, width);

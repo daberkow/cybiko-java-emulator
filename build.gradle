@@ -38,7 +38,7 @@ java {
 
 application {
     // Define the main class for the application.
-    mainClass = 'org.example.cybiko.CybikoXtreme'
+    mainClass = 'org.example.cybiko.CybikoEmulator'
 }
 
 tasks.named('test') {

@@ -1,15 +1,22 @@
-# Cybiko Xtreme Emulator
+# Cybiko Emulator
 
-A standalone Java emulator for the Cybiko Xtreme handheld computer, derived from MAME's emulation by Tim Schuerewegen. Runs CyOS with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code. 99% of this project was created with Claude Code Opus 4.6.
+A standalone Java emulator for the Cybiko handheld computer family, derived from MAME's emulation by Tim Schuerewegen. Supports the Cybiko Classic (V1), V2, and Xtreme with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code. 99% of this project was created with Claude Code Opus 4.6.
 
 ## Quick Start
 
 ```bash
 ./gradlew build
-./gradlew run --args="src/main/resources/cybikoxt/cyrom150.bin src/main/resources/cybikoxt/cyos_v1508.bin"
+
+# Cybiko Xtreme (default)
+./gradlew run --args="cyrom150.bin cyos_v1508.bin"
+
+# Cybiko Classic V1
+./gradlew run --args="--machine v1 cyrom112.bin flash_v1246.bin"
 ```
 
-You need two ROM files from MAME's `cybikoxt.zip`: `cyrom150.bin` (boot ROM) and `cyos_v1508.bin` (CyOS flash).
+You need two ROM files per machine:
+- **Xtreme**: `cyrom150.bin` + `cyos_v1508.bin` from MAME's `cybikoxt.zip`
+- **Classic V1**: `cyrom112.bin` + `flash_v1246.bin` from MAME's `cybiko.zip`
 
 ## Loading Apps
 
@@ -35,6 +42,7 @@ Without `--nvram`, apps are loaded into a temporary image that is lost on exit.
 
 | Flag | Description |
 |------|-------------|
+| `--machine v1\|v2\|xt` | Select machine type (default: `xt`) |
 | `--nvram <file>` | Persistent storage file (created if missing) |
 | `--app <file>` | Add a .app file before booting (repeatable) |
 | `--list-apps` | List installed apps and exit |
@@ -44,7 +52,10 @@ Without `--nvram`, apps are loaded into a temporary image that is lost on exit.
 
 ## Keyboard
 
-The Cybiko keyboard is mapped to your PC keyboard. Letters map directly, navigation with arrow keys, Enter/Space/Tab/Esc as labeled. Numbers use Fn+letter combos (Fn+Q=1, Fn+W=2, ... Fn+P=0) where Fn is mapped to the right Alt key.
+The Cybiko keyboard is mapped to your PC keyboard. Letters map directly, navigation with arrow keys, Enter/Space/Tab/Esc as labeled.
+
+- **Xtreme**: Numbers use Fn+letter combos (Fn+Q=1, Fn+W=2, ... Fn+P=0) where Fn is mapped to the right Alt key.
+- **Classic V1**: Has dedicated number keys mapped directly to 0-9.
 
 ## Links
 
