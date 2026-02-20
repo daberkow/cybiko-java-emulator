@@ -110,6 +110,8 @@ public class CybikoXtreme {
     public AddressBus getBus() { return bus; }
     public HD66421Lcd getLcd() { return lcd; }
     public Memory getExternalRam() { return externalRam; }
+    public H8STimer8 getTimer8(int ch) { return ch == 0 ? timer8_0 : timer8_1; }
+    public H8STimer16 getTimer16(int ch) { return timer16[ch]; }
 
     /** Initialize and start running. */
     public void start() {

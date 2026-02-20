@@ -1,6 +1,6 @@
 # Cybiko Xtreme Emulator
 
-A standalone Java emulator for the Cybiko Xtreme handheld computer, derived from MAME's emulation by Tim Schuerewegen. Runs CyOS with LCD display, keyboard input, sound, and app loading.
+A standalone Java emulator for the Cybiko Xtreme handheld computer, derived from MAME's emulation by Tim Schuerewegen. Runs CyOS with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code. 99% of this project was created with Claude Code Opus 4.6.
 
 ## Quick Start
 
