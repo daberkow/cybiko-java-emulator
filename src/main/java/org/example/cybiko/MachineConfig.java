@@ -22,9 +22,11 @@ public class MachineConfig {
     public final int flashRomSize;     // Memory-mapped flash; 0 for V1 (uses SPI)
     public final int onChipRamSize;
 
-    // Memory base addresses
+    // Memory base addresses and mirror regions
     public final int extRamBase;       // 0x200000 for V1/V2, 0x400000 for XT
+    public final int extRamRegionEnd;  // Last address of RAM region including mirrors
     public final int lcdBase;          // 0x600000 for V1/V2, 0x100000 for XT
+    public final int lcdRegionEnd;     // Last address of LCD region including mirrors
     public final int flashBase;        // Memory-mapped flash base; -1 for V1 (SPI)
     public final int flashRegionEnd;   // Last address of flash memory region (inclusive)
     public final int onChipRamBase;    // 0xFFEC00 for V1, 0xFFDC00 for V2/XT
@@ -57,7 +59,9 @@ public class MachineConfig {
 
     private MachineConfig(MachineType type, String name, long clockHz,
                           int bootRomSize, int externalRamSize, int flashRomSize, int onChipRamSize,
-                          int extRamBase, int lcdBase, int flashBase, int flashRegionEnd, int onChipRamBase,
+                          int extRamBase, int extRamRegionEnd,
+                          int lcdBase, int lcdRegionEnd,
+                          int flashBase, int flashRegionEnd, int onChipRamBase,
                           int bootRomMirrorEnd, int timer16Channels, boolean hasDma,
                           boolean hasSpiFlash, int spiFlashSize,
                           int rtcSclBit, int rtcSdaWriteBit, int rtcSdaReadBit,
@@ -72,7 +76,9 @@ public class MachineConfig {
         this.flashRomSize = flashRomSize;
         this.onChipRamSize = onChipRamSize;
         this.extRamBase = extRamBase;
+        this.extRamRegionEnd = extRamRegionEnd;
         this.lcdBase = lcdBase;
+        this.lcdRegionEnd = lcdRegionEnd;
         this.flashBase = flashBase;
         this.flashRegionEnd = flashRegionEnd;
         this.onChipRamBase = onChipRamBase;
@@ -99,7 +105,9 @@ public class MachineConfig {
                 0,                         // No memory-mapped flash (SPI)
                 0x1400,                    // 4KB + 1KB on-chip RAM (0xFFEC00-0xFFFFFF)
                 0x200000,                  // External RAM base
+                0x27FFFF,                  // External RAM region end (512KB, no mirror)
                 0x600000,                  // LCD base
+                0x600001,                  // LCD region end (no mirror)
                 -1,                        // No memory-mapped flash
                 -1,                        // No flash region end
                 0xFFEC00,                  // On-chip RAM base
@@ -119,19 +127,21 @@ public class MachineConfig {
                 MachineType.V2, "Cybiko v2",
                 11_059_200L,               // 11.0592 MHz
                 0x8000,                    // 32KB boot ROM
-                0x40000,                   // 256KB external RAM
+                0x200000,                  // 2MB external RAM (boot ROM reports 2048K)
                 0x40000,                   // 256KB memory-mapped flash
                 0x2400,                    // 8KB + 1KB on-chip RAM
                 0x200000,                  // External RAM base
+                0x5FFFFF,                  // External RAM region end (2MB, 0x200000-0x3FFFFF + 0x400000-0x5FFFFF)
                 0x600000,                  // LCD base
+                0x7FFFFF,                  // LCD region end (mirror 0x1FFFFE, per MAME)
                 0x100000,                  // Flash base
-                0x13FFFF,                  // Flash region end (256KB, no mirror)
+                0x1FFFFF,                  // Flash region end (256KB mirrored, mirror 0x0C0000)
                 0xFFDC00,                  // On-chip RAM base
                 0x007FFF,                  // Boot ROM: no mirroring
                 3,                         // 3 Timer16 channels
                 false,                     // No DMA
-                false,                     // No SPI flash
-                0,
+                true,                      // Has SPI flash (AT45DB041A)
+                540672,                    // 2048 pages x 264 bytes
                 0x02,                      // SCL = Port F bit 1
                 0x01,                      // SDA write = Port F bit 0 (inverted)
                 0x01,                      // SDA read = Port F bit 0
@@ -147,7 +157,9 @@ public class MachineConfig {
                 0x80000,                   // 512KB memory-mapped flash
                 0x2400,                    // 8KB + 1KB on-chip RAM
                 0x400000,                  // External RAM base
+                0x5FFFFF,                  // External RAM region end (2MB, no mirror)
                 0x100000,                  // LCD base
+                0x100001,                  // LCD region end (no mirror)
                 0x600000,                  // Flash base
                 0x7FFFFF,                  // Flash region end (mirrored across 2MB)
                 0xFFDC00,                  // On-chip RAM base

@@ -64,6 +64,7 @@ public class H8SCpu {
     public void setTracing(boolean tracing) { this.tracing = tracing; if (tracing) this.debug = true; }
     public void setDebug(boolean debug) { this.debug = debug; }
     public boolean isHalted() { return halted; }
+    public void setHalted(boolean halted) { this.halted = halted; }
     public long getCycleCount() { return cycleCount; }
 
     // --- Register access ---
@@ -110,6 +111,7 @@ public class H8SCpu {
     }
 
     public int getPC() { return pc; }
+    public void setPC(int value) { pc = value & 0xFFFFFF; }
     public int getLastStartPC() { return lastStartPC; }
     public void dumpProfile() {
         if (profileDumped || pcHistogram.isEmpty()) return;
@@ -127,6 +129,7 @@ public class H8SCpu {
             });
     }
     public int getCCR() { return ccr; }
+    public void setCCR(int value) { ccr = value & 0xFF; }
     public int getSP() { return er[7]; }
     public int getPendingInterruptCount() { return pendingIrqCount; }
 

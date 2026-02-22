@@ -65,6 +65,7 @@ public class HD66421Lcd {
     private final int[] frameBuffer = new int[WIDTH * HEIGHT]; // reused every frame
     private int regIndex;      // currently selected register
     private int xAddr, yAddr;  // current X/Y position
+    private int writeCount;    // debug: total write8 calls with offset=1
 
     public HD66421Lcd() {
         // Default palette: white, light gray, dark gray, black
@@ -97,6 +98,7 @@ public class HD66421Lcd {
         if (offset == 0) {
             regIndex = value & 0x1F;
         } else {
+            writeCount++;
             // Store register value (matching MAME: m_reg[m_cmd] = data)
             regs[regIndex] = value;
 
@@ -179,4 +181,7 @@ public class HD66421Lcd {
 
     /** Get registers for debugging. */
     public int[] getRegs() { return regs; }
+
+    /** Debug: get total write count (offset=1 writes). */
+    public int getWriteCount() { return writeCount; }
 }

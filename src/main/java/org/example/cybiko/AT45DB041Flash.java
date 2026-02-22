@@ -46,6 +46,10 @@ public class AT45DB041Flash {
     private int status = 0x80; // Bit 7 = ready
 
     private boolean csActive = false;
+    private int readCmdLog = 0;
+
+    /** Check if the flash chip select is currently active. */
+    public boolean isSelected() { return csActive; }
 
     public AT45DB041Flash(byte[] flashData) {
         data = new byte[TOTAL_SIZE];
@@ -85,7 +89,7 @@ public class AT45DB041Flash {
      * @return byte sent to CPU (MISO), or 0 if in input mode
      */
     public int transfer(int dataIn) {
-        if (!csActive) return 0;
+        if (!csActive) return 0xFF;  // SPI bus idle: MISO pulled high
 
         if (mode == MODE_SO) {
             // Output mode: return next byte from I/O buffer

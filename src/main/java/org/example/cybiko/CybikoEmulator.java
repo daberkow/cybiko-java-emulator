@@ -24,12 +24,27 @@ public class CybikoEmulator {
     private final H8STimer8 timer8_1;
     private final H8STimer16[] timer16;
 
-    private AT45DB041Flash spiFlash;   // V1 only
+    private AT45DB041Flash spiFlash;   // V1/V2
     private FrameBufferRenderer renderer;
     private SpeakerOutput speaker;
     private boolean running = false;
     private boolean headless = false;
     private Path nvramPath;
+
+    // V2: RTOS set_task_state address for auto-resolving service startup waits.
+    // V2 CyOS starts RF driver, RF monitor, messenger, and receiver services during
+    // boot. Each uses set_task_state to wait for the service to reach a ready state.
+    // Without RF hardware emulation, these waits block forever. Auto-resolving writes
+    // the expected state to the object before the check, letting boot continue.
+    //
+    // Always-resolve (not once-per-pair): services like 0x208B84 are polled ~2.3M
+    // times during normal boot. The RF task object (0x202CB2) is blacklisted because
+    // resolving it during boot triggers RF hardware init that fails and permanently
+    // blocks boot. The RF object address is ROM-specific — 0x202CB2 is for CyOS v1358.
+    private static final int V2_SET_TASK_STATE_ADDR = 0x1073AC;
+    private static final int V2_STATE_OFFSET = 0x14;
+    private static final int V2_RF_OBJ = 0x202CB2;  // RF task object (CyOS v1358)
+    private final boolean v2ServiceStub;
 
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60;
 
@@ -77,6 +92,9 @@ public class CybikoEmulator {
             bus.setTimer16(4, timer16[4]);
             bus.setTimer16(5, timer16[5]);
         }
+
+        // V2: enable service startup stub (no RF hardware emulation yet)
+        v2ServiceStub = (config.type == MachineConfig.MachineType.V2);
     }
 
     /** Convenience constructor for XT (backward compatibility). */
@@ -92,15 +110,23 @@ public class CybikoEmulator {
 
     public void loadFlashRom(Path path) throws IOException {
         byte[] data = Files.readAllBytes(path);
-        if (config.hasSpiFlash) {
-            // V1: load into AT45DB041 SPI flash
+        if (config.flashRomSize > 0 && flashRom != null) {
+            // V2/XT: load into memory-mapped flash
+            flashRom.load(data, 0);
+            System.out.printf("Loaded flash ROM: %s (%d bytes)%n", path, data.length);
+        } else if (config.hasSpiFlash) {
+            // V1: no memory-mapped flash, load into SPI flash instead
             spiFlash = new AT45DB041Flash(data);
             bus.setSpiFlash(spiFlash);
             System.out.printf("Loaded SPI flash: %s (%d bytes)%n", path, data.length);
-        } else if (flashRom != null) {
-            flashRom.load(data, 0);
-            System.out.printf("Loaded flash ROM: %s (%d bytes)%n", path, data.length);
         }
+    }
+
+    public void loadSpiFlash(Path path) throws IOException {
+        byte[] data = Files.readAllBytes(path);
+        spiFlash = new AT45DB041Flash(data);
+        bus.setSpiFlash(spiFlash);
+        System.out.printf("Loaded SPI dataflash: %s (%d bytes)%n", path, data.length);
     }
 
     public void setRenderer(FrameBufferRenderer renderer) {
@@ -176,7 +202,23 @@ public class CybikoEmulator {
                 if (t16_4_run) timer16[4].tick();
                 if (t16_5_run) timer16[5].tick();
 
+                // V2: auto-resolve set_task_state to bypass unimplemented service waits.
+                // Skip the RF task object (resolving it triggers failed hardware init
+                // that permanently blocks boot). Always-resolve for all other services.
+                if (v2ServiceStub && cpu.getPC() == V2_SET_TASK_STATE_ADDR) {
+                    int obj = cpu.getER(0);
+                    if (obj != V2_RF_OBJ) {
+                        int expectedByte = cpu.getER(1) & 0xFF;
+                        int currentByte = bus.read8(obj + V2_STATE_OFFSET);
+                        if (currentByte != expectedByte) {
+                            bus.write8(obj + V2_STATE_OFFSET, expectedByte);
+                            cpu.setCCR(cpu.getCCR() & ~0x80);
+                        }
+                    }
+                }
+
                 cpu.step();
+                bus.tickDtcCompletion();
                 totalSteps++;
 
                 if (totalSteps >= maxSteps) break;
@@ -267,17 +309,19 @@ public class CybikoEmulator {
     // --- Main entry point ---
     public static void main(String[] args) {
         if (args.length < 1) {
-            System.out.println("Usage: cybiko-java [--machine v1|v2|xt] <boot_rom.bin> [flash_rom.bin] [options]");
+            System.out.println("Usage: cybiko-java [--machine v1|v2|xt] <boot_rom.bin> [flash_rom.bin] [dataflash.bin] [options]");
             System.out.println();
-            System.out.println("  --machine <type> - Machine type: v1 (Classic), v2, xt (Xtreme, default)");
-            System.out.println("  boot_rom.bin     - 32KB boot ROM (e.g., cyrom150.bin for XT, cyrom112.bin for V1)");
-            System.out.println("  flash_rom.bin    - Flash ROM (e.g., cyos_v1508.bin for XT, flash_v1246.bin for V1)");
-            System.out.println("  --headless       - Run without GUI window");
-            System.out.println("  --trace          - Enable instruction tracing");
-            System.out.println("  --nvram <file>   - Load/save NVRAM (persistent RAM with CFS filesystem)");
-            System.out.println("  --app <file>     - Add .app to NVRAM before booting (requires --nvram or XT)");
-            System.out.println("  --list-apps      - List apps in NVRAM and exit");
-            System.out.println("  --mute           - Disable audio output");
+            System.out.println("  --machine <type>  - Machine type: v1 (Classic), v2, xt (Xtreme, default)");
+            System.out.println("  boot_rom.bin      - 32KB boot ROM");
+            System.out.println("  flash_rom.bin     - Flash ROM (memory-mapped for V2/XT, SPI for V1)");
+            System.out.println("  dataflash.bin     - SPI dataflash (V2 only, 3rd positional arg or --dataflash)");
+            System.out.println("  --dataflash <file> - SPI dataflash file (AT45DB041, V2 only)");
+            System.out.println("  --headless        - Run without GUI window");
+            System.out.println("  --trace           - Enable instruction tracing");
+            System.out.println("  --nvram <file>    - Load/save NVRAM (persistent RAM with CFS filesystem)");
+            System.out.println("  --app <file>      - Add .app to NVRAM before booting");
+            System.out.println("  --list-apps       - List apps in NVRAM and exit");
+            System.out.println("  --mute            - Disable audio output");
             System.exit(1);
         }
 
@@ -290,6 +334,7 @@ public class CybikoEmulator {
         // Parse arguments
         String bootRomPath = null;
         String flashRomPath = null;
+        String spiFlashPath = null;
         String nvramFile = null;
         java.util.List<String> appPaths = new java.util.ArrayList<>();
 
@@ -316,9 +361,11 @@ public class CybikoEmulator {
                 }
                 case "--nvram" -> { if (i + 1 < args.length) nvramFile = args[++i]; }
                 case "--app" -> { if (i + 1 < args.length) appPaths.add(args[++i]); }
+                case "--dataflash" -> { if (i + 1 < args.length) spiFlashPath = args[++i]; }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
+                    else if (spiFlashPath == null) spiFlashPath = args[i];
                 }
             }
         }
@@ -330,6 +377,9 @@ public class CybikoEmulator {
             emu.loadBootRom(Path.of(bootRomPath));
             if (flashRomPath != null) {
                 emu.loadFlashRom(Path.of(flashRomPath));
+            }
+            if (spiFlashPath != null && config.hasSpiFlash) {
+                emu.loadSpiFlash(Path.of(spiFlashPath));
             }
 
             // NVRAM handling (CFS filesystem in external RAM)

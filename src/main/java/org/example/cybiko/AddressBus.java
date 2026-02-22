@@ -56,14 +56,24 @@ public class AddressBus {
     private int adcsr = 0;
     private int adcr = 0x7E;
 
+    // ICR (Interrupt Control Register) - V1/V2 H8S/2245 only
+    private int icr = 0;
+
     // DMA Controller state (XT only)
     private final int[] dmaRegs = new int[32];
     private final int[] dmaCtrl = new int[8];
 
-    // SPI flash (V1 only) - AT45DB041 connected via SCI1
+    // SPI flash (V1/V2) - AT45DB041 connected via SCI1
     private AT45DB041Flash spiFlash;
     private int sci1Rdr = 0;       // SCI1 receive data register (byte from SPI flash)
     private boolean sci1Rdrf = false; // SCI1 receive data register full
+
+    // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
+    // cycles. The completion interrupt fires after the last byte, by which time the CPU has
+    // typically re-enabled interrupts. Our synchronous DTC fires during the SCR write (while
+    // I=1), so if the caller's saved CCR also has I=1, the interrupt can never be serviced.
+    // Fix: defer the interrupt by a few cycles to match real hardware timing.
+    private int dtcCompletionDelay = 0; // Countdown cycles until vector 85 fires (0 = none)
 
     // CPU reference for debug logging
     private H8SCpu cpu;
@@ -88,6 +98,22 @@ public class AddressBus {
     public void setTimer16(int ch, H8STimer16 timer) { timer16[ch] = timer; }
     public void setSpiFlash(AT45DB041Flash flash) { this.spiFlash = flash; }
 
+    /**
+     * Tick deferred DTC completion. Call from main loop after each cpu.step().
+     * In real hardware, the DTC transfer takes multiple SPI clock cycles.
+     * The completion interrupt fires after the last byte, by which time the CPU
+     * has typically re-enabled interrupts (via LDC CCR). Deferring by a few cycles
+     * prevents the interrupt from being requested while I=1 in the caller's save/restore.
+     */
+    public void tickDtcCompletion() {
+        if (dtcCompletionDelay > 0) {
+            dtcCompletionDelay--;
+            if (dtcCompletionDelay == 0 && cpu != null) {
+                cpu.requestInterrupt(85);
+            }
+        }
+    }
+
     // Legacy setters (delegate to indexed version)
     public void setTimer16_0(H8STimer16 t) { timer16[0] = t; }
     public void setTimer16_1(H8STimer16 t) { timer16[1] = t; }
@@ -105,8 +131,8 @@ public class AddressBus {
             case BOOT_ROM -> bootRom.read8(address & 0x7FFF);
             case LCD -> lcd.read8(address & 1);
             case USB -> 0;
-            case EXT_RAM -> externalRam.read8(address - config.extRamBase);
-            case FLASH -> flashRom.read8((address - config.flashBase) & (config.flashRomSize - 1));
+            case EXT_RAM -> externalRam.read8(extRamOffset(address));
+            case FLASH -> flashRom.read8(flashOffset(address));
             case KEYBOARD -> {
                 int kbVal = readKeyboard(address & ~1);
                 yield (address & 1) == 0 ? (kbVal >> 8) & 0xFF : kbVal & 0xFF;
@@ -122,8 +148,8 @@ public class AddressBus {
             case BOOT_ROM -> bootRom.read16(address & 0x7FFF);
             case LCD -> (lcd.read8(0) << 8) | lcd.read8(1);
             case USB -> 0;
-            case EXT_RAM -> externalRam.read16(address - config.extRamBase);
-            case FLASH -> flashRom.read16((address - config.flashBase) & (config.flashRomSize - 1));
+            case EXT_RAM -> externalRam.read16(extRamOffset(address));
+            case FLASH -> flashRom.read16(flashOffset(address));
             case KEYBOARD -> readKeyboard(address);
             case ON_CHIP -> readOnChip16(address);
             case UNMAPPED -> { logUnmapped("read16", address); yield 0; }
@@ -140,10 +166,10 @@ public class AddressBus {
             case BOOT_ROM -> {}
             case LCD -> lcd.write8(address & 1, value);
             case USB -> {}
-            case EXT_RAM -> externalRam.write8(address - config.extRamBase, value);
+            case EXT_RAM -> externalRam.write8(extRamOffset(address), value);
             case FLASH -> {
                 if (flashRom != null)
-                    flashRom.write8((address - config.flashBase) & (config.flashRomSize - 1), value);
+                    flashRom.write8(flashOffset(address), value);
             }
             case KEYBOARD -> {}
             case ON_CHIP -> writeOnChip8(address, value);
@@ -157,10 +183,10 @@ public class AddressBus {
             case BOOT_ROM -> {}
             case LCD -> { lcd.write8(0, value >> 8); lcd.write8(1, value & 0xFF); }
             case USB -> {}
-            case EXT_RAM -> externalRam.write16(address - config.extRamBase, value);
+            case EXT_RAM -> externalRam.write16(extRamOffset(address), value);
             case FLASH -> {
                 if (flashRom != null)
-                    flashRom.write16((address - config.flashBase) & (config.flashRomSize - 1), value);
+                    flashRom.write16(flashOffset(address), value);
             }
             case KEYBOARD -> {}
             case ON_CHIP -> writeOnChip16(address, value);
@@ -238,6 +264,10 @@ public class AddressBus {
             if ((wordOffset & (1 << i)) == 0) {
                 data &= ~keyColumns[i];
             }
+        }
+        // V2 keyboard quirk from MAME: force bit 1 when column 0 is selected
+        if (config.type == MachineConfig.MachineType.V2 && (wordOffset & 1) == 0) {
+            data |= 0x0002;
         }
         return data;
     }
@@ -376,6 +406,12 @@ public class AddressBus {
         }
         if (address == 0xFFFF8C) return SSR_TDRE | SSR_TEND; // SCI2 SSR
 
+        // ICR registers (V1/V2 only, H8S/2245 interrupt controller)
+        if (config.type != MachineConfig.MachineType.XT
+                && address >= 0xFFFEC0 && address <= 0xFFFEC2) {
+            return (icr >> (8 * (address - 0xFFFEC0))) & 0xFF;
+        }
+
         // DMA registers (XT only)
         if (config.hasDma) {
             if (address >= 0xFFFEE0 && address <= 0xFFFEFF) {
@@ -383,6 +419,16 @@ public class AddressBus {
             }
             if (address >= 0xFFFF00 && address <= 0xFFFF07) {
                 return dmaCtrl[address - 0xFFFF00];
+            }
+        }
+
+        // DTC registers (V1/V2)
+        if (!config.hasDma) {
+            if (address >= 0xFFFF30 && address <= 0xFFFF35) {
+                return onChipRam.read8(onChipOffset(address));
+            }
+            if (address == 0xFFFF37) {
+                return onChipRam.read8(onChipOffset(address));
             }
         }
 
@@ -428,7 +474,17 @@ public class AddressBus {
 
         // ADC registers
         if (address >= 0xFFFF90 && address <= 0xFFFF99) {
-            if (address <= 0xFFFF97) return (address % 2 == 0) ? 0xCC : 0x00;
+            if (address <= 0xFFFF97) {
+                if (config.type != MachineConfig.MachineType.XT) {
+                    // V1/V2: MAME returns 0x0001 for ADC channel 1, 0x0000 for all others
+                    int channel = (address - 0xFFFF90) / 2;
+                    if (channel == 1) {
+                        return (address % 2 == 0) ? 0x00 : 0x01;
+                    }
+                    return 0x00;
+                }
+                return (address % 2 == 0) ? 0xCC : 0x00;
+            }
             if (address == 0xFFFF98) return adcsr;
             return adcr;
         }
@@ -507,6 +563,14 @@ public class AddressBus {
             return;
         }
 
+        // ICR registers (V1/V2 only)
+        if (config.type != MachineConfig.MachineType.XT
+                && address >= 0xFFFEC0 && address <= 0xFFFEC2) {
+            int shift = 8 * (address - 0xFFFEC0);
+            icr = (icr & ~(0xFF << shift)) | ((value & 0xFF) << shift);
+            return;
+        }
+
         // Port DDR registers (0xFFFEB0-0xFFFEBF)
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
             onChipRam.write8(onChipOffset(address), value);
@@ -524,11 +588,15 @@ public class AddressBus {
             return;
         }
 
-        // Port 3 write (0xFFFF62) - V1: bit 4 controls SPI flash CS
+        // Port 3 write (0xFFFF62) - bit 4 controls SPI flash CS
+        // Flash CS is only driven when Port 3 DDR bit 4 = 1 (output mode).
+        // When DDR bit 4 = 0 (input), pin floats high via pull-up = flash deselected.
         if (address == 0xFFFF62) {
             if (spiFlash != null) {
-                // CS is active-low: bit 4 = 0 means selected
-                spiFlash.cs((value & 0x10) == 0);
+                int port3ddr = onChipRam.read8(onChipOffset(0xFFFEB2));
+                // CS active only when DDR=output(1) AND DR=low(0)
+                boolean nowSelected = (port3ddr & 0x10) != 0 && (value & 0x10) == 0;
+                spiFlash.cs(nowSelected);
             }
             onChipRam.write8(onChipOffset(address), value);
             return;
@@ -636,18 +704,16 @@ public class AddressBus {
 
         if (count == 0) return;
 
+        // SCI1 DTC transfers are used by CyOS for RF chip communication, NOT flash.
+        // The boot ROM reads flash via byte-by-byte SCI1 TDR/RDR (handled elsewhere).
+        // After boot, CyOS uses SCI1 DTC exclusively for the RF chip, which has a
+        // separate CS pin not modeled here. Return 0xFF (idle SPI bus) for all DTC.
         if (mra == 0x20 && receiveMode) {
-            // Receive mode: read from SPI flash into destination buffer
             for (int i = 0; i < count; i++) {
-                int b = spiFlash.transfer(0xFF);
-                write8(dar + i, b);
+                write8(dar + i, 0xFF);
             }
         } else if (mra == 0x80 && transmitMode) {
-            // Transmit mode: send from source buffer to SPI flash
-            for (int i = 0; i < count; i++) {
-                int b = read8(sarLo + i);
-                sci1Rdr = spiFlash.transfer(b);
-            }
+            sci1Rdr = 0xFF;
             sci1Rdrf = true;
         } else {
             return; // Unknown mode, don't handle
@@ -660,10 +726,20 @@ public class AddressBus {
         // Clear DTCER bit to disable DTC for this source
         onChipRam.write8(onChipOffset(0xFFFF34), dtcer & ~0x02);
 
-        // Fire SCI1 RXI interrupt (vector 85) for completion handler
-        if (cpu != null) {
-            cpu.requestInterrupt(85);
-        }
+        // Directly perform the SCI1 RXI completion handler's work instead of deferring
+        // to vector 85. The ISR at 0x1085E0 (called via 0xFFECA0 trampoline) does:
+        //   1. Disable SCI1 (SCR = 0), then re-enable basic mode (SCR = 0x30)
+        //   2. Clear RDRF and ORER in SCI1 SSR
+        //   3. Write 0x01 to completion flag at 0x20023C
+        // Doing this synchronously avoids the need for vector 85 interrupt delivery,
+        // which would deadlock when the caller has I=1 (masked interrupts).
+        onChipRam.write8(onChipOffset(0xFFFF82), 0x00);
+        onChipRam.write8(onChipOffset(0xFFFF82), 0x30);
+        // Clear RDRF (bit 6) and ORER (bit 5) in SCI1 SSR (0xFFFF84)
+        int ssr = onChipRam.read8(onChipOffset(0xFFFF84));
+        onChipRam.write8(onChipOffset(0xFFFF84), ssr & ~0x60);
+        // Set completion flag
+        write8(0x20023C, 0x01);
     }
 
     private void writeOnChip16(int address, int value) {
@@ -687,18 +763,18 @@ public class AddressBus {
         // Boot ROM region
         if (address <= config.bootRomMirrorEnd) return Region.BOOT_ROM;
 
-        // LCD
-        if (address >= config.lcdBase && address <= config.lcdBase + 1) return Region.LCD;
+        // LCD (including mirrors - V2 mirrors across 0x600000-0x7FFFFF)
+        if (address >= config.lcdBase && address <= config.lcdRegionEnd) return Region.LCD;
 
         // USB (XT only)
         if (config.type == MachineConfig.MachineType.XT
                 && address >= 0x200000 && address <= 0x200003) return Region.USB;
 
-        // External RAM
+        // External RAM (including mirrors - V2 mirrors 256KB across 0x200000-0x3FFFFF)
         if (address >= config.extRamBase
-                && address < config.extRamBase + config.externalRamSize) return Region.EXT_RAM;
+                && address <= config.extRamRegionEnd) return Region.EXT_RAM;
 
-        // Memory-mapped flash (V2 and XT)
+        // Memory-mapped flash (V2 and XT, including mirrors)
         if (config.flashBase >= 0 && flashRom != null
                 && address >= config.flashBase
                 && address <= config.flashRegionEnd) return Region.FLASH;
@@ -710,6 +786,16 @@ public class AddressBus {
         if (address >= config.onChipRamBase && address <= 0xFFFFFF) return Region.ON_CHIP;
 
         return Region.UNMAPPED;
+    }
+
+    /** Map a mirrored external RAM address to a physical offset within the RAM array. */
+    private int extRamOffset(int address) {
+        return (address - config.extRamBase) % config.externalRamSize;
+    }
+
+    /** Map a mirrored flash address to a physical offset within the flash ROM array. */
+    private int flashOffset(int address) {
+        return (address - config.flashBase) % config.flashRomSize;
     }
 
     public String drainSerialOutput(int channel) {
