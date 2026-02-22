@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;

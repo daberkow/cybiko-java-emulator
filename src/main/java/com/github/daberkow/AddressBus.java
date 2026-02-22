@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /**
  * Memory-mapped I/O bus for Cybiko emulators (V1, V2, XT).

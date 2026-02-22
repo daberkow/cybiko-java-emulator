@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /**
  * Hitachi H8S/2323 CPU emulator core.

@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 import javax.swing.*;
 import java.awt.*;

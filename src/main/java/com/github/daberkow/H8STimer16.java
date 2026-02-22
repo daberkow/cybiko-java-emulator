@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /**
  * Simple H8S 16-bit timer channel emulation (TPU - Timer Pulse Unit).

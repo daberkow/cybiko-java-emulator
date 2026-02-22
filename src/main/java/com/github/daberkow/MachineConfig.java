@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /**
  * Machine configuration for different Cybiko hardware variants.

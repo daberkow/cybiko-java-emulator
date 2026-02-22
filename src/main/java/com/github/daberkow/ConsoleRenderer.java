@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /** ASCII art console renderer for debugging. */
 public class ConsoleRenderer implements FrameBufferRenderer {

@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /**
  * AT45DB041 SPI DataFlash emulation (matching MAME at45dbxx.cpp).

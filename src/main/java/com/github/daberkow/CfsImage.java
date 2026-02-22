@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 import java.util.ArrayList;
 import java.util.Arrays;

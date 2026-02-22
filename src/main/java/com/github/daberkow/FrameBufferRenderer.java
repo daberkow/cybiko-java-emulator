@@ -1,4 +1,4 @@
-package org.example.cybiko;
+package com.github.daberkow;
 
 /** Interface for rendering the LCD frame buffer to a display output. */
 public interface FrameBufferRenderer {
