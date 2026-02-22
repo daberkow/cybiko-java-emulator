@@ -1,0 +1,28 @@
+plugins {
+    id 'application'
+    id 'idea'
+    id 'com.github.ben-manes.versions'
+}
+
+// Read version from VERSION file, with optional build number from CI
+version = file('VERSION').text.trim() + (System.getenv('BUILD_NUMBER') ? ".${System.getenv('BUILD_NUMBER')}" : '')
+
+dependencies {
+    // Use JUnit Jupiter for testing.
+    testImplementation libs.junit.jupiter
+
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // This dependency is used by the application.
+    implementation libs.guava
+}
+
+application {
+    // Define the main class for the application.
+    mainClass = 'com.github.daberkow.CybikoEmulator'
+}
+
+tasks.named('test') {
+    // Use JUnit Platform for unit tests.
+    useJUnitPlatform()
+}
