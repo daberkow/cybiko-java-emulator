@@ -704,19 +704,37 @@ public class AddressBus {
 
         if (count == 0) return;
 
-        // SCI1 DTC transfers are used by CyOS for RF chip communication, NOT flash.
-        // The boot ROM reads flash via byte-by-byte SCI1 TDR/RDR (handled elsewhere).
-        // After boot, CyOS uses SCI1 DTC exclusively for the RF chip, which has a
-        // separate CS pin not modeled here. Return 0xFF (idle SPI bus) for all DTC.
-        if (mra == 0x20 && receiveMode) {
-            for (int i = 0; i < count; i++) {
-                write8(dar + i, 0xFF);
+        if (config.type == MachineConfig.MachineType.V1 && spiFlash != null) {
+            // V1: DTC transfers talk to the SPI flash (AT45DB041) for bulk page reads
+            if (mra == 0x20 && receiveMode) {
+                // Receive mode: read from SPI flash into destination buffer
+                for (int i = 0; i < count; i++) {
+                    int b = spiFlash.transfer(0xFF);
+                    write8(dar + i, b);
+                }
+            } else if (mra == 0x80 && transmitMode) {
+                // Transmit mode: send from source buffer to SPI flash
+                for (int i = 0; i < count; i++) {
+                    int b = read8(sarLo + i);
+                    sci1Rdr = spiFlash.transfer(b);
+                }
+                sci1Rdrf = true;
+            } else {
+                return;
             }
-        } else if (mra == 0x80 && transmitMode) {
-            sci1Rdr = 0xFF;
-            sci1Rdrf = true;
         } else {
-            return; // Unknown mode, don't handle
+            // V2: SCI1 DTC transfers are for RF chip communication, not flash.
+            // Return 0xFF (idle SPI bus) since RF hardware is not emulated.
+            if (mra == 0x20 && receiveMode) {
+                for (int i = 0; i < count; i++) {
+                    write8(dar + i, 0xFF);
+                }
+            } else if (mra == 0x80 && transmitMode) {
+                sci1Rdr = 0xFF;
+                sci1Rdrf = true;
+            } else {
+                return;
+            }
         }
 
         // Clear DTC count
@@ -726,20 +744,21 @@ public class AddressBus {
         // Clear DTCER bit to disable DTC for this source
         onChipRam.write8(onChipOffset(0xFFFF34), dtcer & ~0x02);
 
-        // Directly perform the SCI1 RXI completion handler's work instead of deferring
-        // to vector 85. The ISR at 0x1085E0 (called via 0xFFECA0 trampoline) does:
-        //   1. Disable SCI1 (SCR = 0), then re-enable basic mode (SCR = 0x30)
-        //   2. Clear RDRF and ORER in SCI1 SSR
-        //   3. Write 0x01 to completion flag at 0x20023C
-        // Doing this synchronously avoids the need for vector 85 interrupt delivery,
-        // which would deadlock when the caller has I=1 (masked interrupts).
-        onChipRam.write8(onChipOffset(0xFFFF82), 0x00);
-        onChipRam.write8(onChipOffset(0xFFFF82), 0x30);
-        // Clear RDRF (bit 6) and ORER (bit 5) in SCI1 SSR (0xFFFF84)
-        int ssr = onChipRam.read8(onChipOffset(0xFFFF84));
-        onChipRam.write8(onChipOffset(0xFFFF84), ssr & ~0x60);
-        // Set completion flag
-        write8(0x20023C, 0x01);
+        if (config.type == MachineConfig.MachineType.V1) {
+            // V1: Fire SCI1 RXI interrupt (vector 85) for completion handler.
+            // Use deferred delivery so the interrupt arrives after the caller
+            // has re-enabled interrupts.
+            dtcCompletionDelay = 5;
+        } else {
+            // V2: Directly perform the SCI1 RXI completion handler's work.
+            // The V2 ISR at 0x1085E0 does: disable SCI1, re-enable basic mode,
+            // clear RDRF/ORER, write completion flag at 0x20023C.
+            onChipRam.write8(onChipOffset(0xFFFF82), 0x00);
+            onChipRam.write8(onChipOffset(0xFFFF82), 0x30);
+            int ssr = onChipRam.read8(onChipOffset(0xFFFF84));
+            onChipRam.write8(onChipOffset(0xFFFF84), ssr & ~0x60);
+            write8(0x20023C, 0x01);
+        }
     }
 
     private void writeOnChip16(int address, int value) {
