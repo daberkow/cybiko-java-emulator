@@ -10,7 +10,9 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
 import java.nio.file.Path;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -32,10 +34,18 @@ public class SidebarPane extends VBox {
             long total = image.totalCapacity();
             return String.format("%d KB / %d KB", used / 1024, total / 1024);
         }
+
+        @Override
+        public String toString() {
+            return displayName() + " (" + sizeInfo() + ")";
+        }
     }
 
     private final ObservableList<ImageEntry> nvramEntries = FXCollections.observableArrayList();
     private final ListView<ImageEntry> nvramList = new ListView<>(nvramEntries);
+
+    // Track unsaved adds/removes per image (keyed by identity, not equals)
+    private final Map<CfsImage, int[]> changeCounts = new IdentityHashMap<>();
 
     private final ObservableList<LibraryFolder> libraryFolders = FXCollections.observableArrayList();
     private final ListView<LibraryFolder> libraryList = new ListView<>(libraryFolders);
@@ -43,6 +53,7 @@ public class SidebarPane extends VBox {
     private boolean suppressSelection = false;
 
     private Consumer<ImageEntry> onNvramSelected;
+    private Consumer<ImageEntry> onCloseNvram;
     private Consumer<LibraryFolder> onLibrarySelected;
     private Runnable onAddLibraryFolder;
     private Consumer<LibraryFolder> onRemoveLibraryFolder;
@@ -56,22 +67,47 @@ public class SidebarPane extends VBox {
         nvramHeader.getStyleClass().add("section-header");
         nvramHeader.setMaxWidth(Double.MAX_VALUE);
 
-        nvramList.setCellFactory(lv -> new ListCell<>() {
-            @Override
-            protected void updateItem(ImageEntry item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty || item == null) {
-                    setGraphic(null);
-                } else {
-                    VBox cell = new VBox(2);
-                    Label name = new Label(item.displayName());
-                    name.getStyleClass().add("detail-value");
-                    Label info = new Label(item.sizeInfo());
-                    info.getStyleClass().add("detail-label");
-                    cell.getChildren().addAll(name, info);
-                    setGraphic(cell);
+        nvramList.setCellFactory(lv -> {
+            ListCell<ImageEntry> cell = new ListCell<>() {
+                @Override
+                protected void updateItem(ImageEntry item, boolean empty) {
+                    super.updateItem(item, empty);
+                    if (empty || item == null) {
+                        setGraphic(null);
+                    } else {
+                        VBox box = new VBox(2);
+                        Label name = new Label(item.displayName());
+                        name.getStyleClass().add("detail-value");
+
+                        // Build info line with size and unsaved change counts
+                        StringBuilder infoText = new StringBuilder(item.sizeInfo());
+                        int[] counts = changeCounts.get(item.image());
+                        if (counts != null && (counts[0] > 0 || counts[1] > 0)) {
+                            infoText.append("  ");
+                            if (counts[0] > 0) infoText.append("+").append(counts[0]);
+                            if (counts[0] > 0 && counts[1] > 0) infoText.append(" ");
+                            if (counts[1] > 0) infoText.append("-").append(counts[1]);
+                        }
+                        Label info = new Label(infoText.toString());
+                        info.getStyleClass().add("detail-label");
+                        box.getChildren().addAll(name, info);
+                        setGraphic(box);
+                    }
                 }
-            }
+            };
+
+            ContextMenu contextMenu = new ContextMenu();
+            MenuItem closeItem = new MenuItem("Close");
+            closeItem.setOnAction(e -> {
+                ImageEntry entry = cell.getItem();
+                if (entry != null && onCloseNvram != null) {
+                    onCloseNvram.accept(entry);
+                }
+            });
+            contextMenu.getItems().add(closeItem);
+            cell.setContextMenu(contextMenu);
+
+            return cell;
         });
 
         nvramList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
@@ -193,6 +229,45 @@ public class SidebarPane extends VBox {
                 return;
             }
         }
+    }
+
+    /** Record that a file was added to the given image. */
+    public void recordAdd(CfsImage image) {
+        changeCounts.computeIfAbsent(image, k -> new int[2])[0]++;
+        refreshEntry(image);
+    }
+
+    /** Record that files were removed from the given image. */
+    public void recordRemove(CfsImage image, int count) {
+        changeCounts.computeIfAbsent(image, k -> new int[2])[1] += count;
+        refreshEntry(image);
+    }
+
+    /** Clear change counts for an image (e.g., after saving). */
+    public void clearChangeCounts(CfsImage image) {
+        changeCounts.remove(image);
+        refreshEntry(image);
+    }
+
+    /** Refresh the sidebar display for a specific image. */
+    public void refreshEntry(CfsImage image) {
+        for (int i = 0; i < nvramEntries.size(); i++) {
+            ImageEntry entry = nvramEntries.get(i);
+            if (entry.image() == image) {
+                nvramEntries.set(i, new ImageEntry(entry.path(), entry.image(), entry.customName()));
+                return;
+            }
+        }
+    }
+
+    /** Remove an NVRAM image from the sidebar and clean up change counts. */
+    public void removeImage(CfsImage image) {
+        changeCounts.remove(image);
+        nvramEntries.removeIf(e -> e.image() == image);
+    }
+
+    public void setOnCloseNvram(Consumer<ImageEntry> callback) {
+        this.onCloseNvram = callback;
     }
 
     /** Get all NVRAM entries for unsaved changes check. */

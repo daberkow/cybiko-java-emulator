@@ -93,7 +93,9 @@ public class CybikoEmulator {
             bus.setTimer16(5, timer16[5]);
         }
 
-        // V2: enable service startup stub (no RF hardware emulation yet)
+        // V2: enable service startup stub to auto-resolve service waits during boot.
+        // V2 CyOS starts several services that wait on each other; without this,
+        // boot stalls before reaching CyOS init.
         v2ServiceStub = (config.type == MachineConfig.MachineType.V2);
     }
 
@@ -202,18 +204,19 @@ public class CybikoEmulator {
                 if (t16_4_run) timer16[4].tick();
                 if (t16_5_run) timer16[5].tick();
 
-                // V2: auto-resolve set_task_state to bypass unimplemented service waits.
-                // Skip the RF task object (resolving it triggers failed hardware init
-                // that permanently blocks boot). Always-resolve for all other services.
+                // V2: auto-resolve set_task_state for services that wait on
+                // unimplemented hardware (RF, etc). Phased: resolve base services
+                // always, all non-RF services after frame 1200.
+                // RF (0x202CB2) is NEVER resolved — causes failed HW init.
                 if (v2ServiceStub && cpu.getPC() == V2_SET_TASK_STATE_ADDR) {
                     int obj = cpu.getER(0);
-                    if (obj != V2_RF_OBJ) {
-                        int expectedByte = cpu.getER(1) & 0xFF;
-                        int currentByte = bus.read8(obj + V2_STATE_OFFSET);
-                        if (currentByte != expectedByte) {
-                            bus.write8(obj + V2_STATE_OFFSET, expectedByte);
-                            cpu.setCCR(cpu.getCCR() & ~0x80);
-                        }
+                    int expectedByte = cpu.getER(1) & 0xFF;
+                    int currentByte = bus.read8(obj + V2_STATE_OFFSET);
+                    boolean isBase = (obj == 0x208B84 || obj == 0x203512);
+                    boolean isLate = (obj != V2_RF_OBJ && frameCounter >= 1200);
+                    if ((isBase || isLate) && currentByte != expectedByte) {
+                        bus.write8(obj + V2_STATE_OFFSET, expectedByte);
+                        cpu.setCCR(cpu.getCCR() & ~0x80);
                     }
                 }
 

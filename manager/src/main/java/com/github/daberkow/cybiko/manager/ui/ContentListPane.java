@@ -16,7 +16,7 @@ import javafx.scene.layout.VBox;
 
 import java.time.format.DateTimeFormatter;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -67,11 +67,15 @@ public class ContentListPane extends VBox {
 
         // Status column
         TableColumn<ContentItem, String> statusCol = new TableColumn<>("Status");
-        statusCol.setCellValueFactory(p ->
-            new ReadOnlyStringWrapper(p.getValue().inNvram() ? "In NVRAM" : "")
-        );
+        statusCol.setCellValueFactory(p -> {
+            ContentItem val = p.getValue();
+            if (val instanceof LibraryItem li && li.inNvram()) {
+                return new ReadOnlyStringWrapper(li.nvramStatus());
+            }
+            return new ReadOnlyStringWrapper(val.inNvram() ? "In NVRAM" : "");
+        });
         statusCol.setCellFactory(col -> new TableCell<>() {
-            private final Label badge = new Label("In NVRAM");
+            private final Label badge = new Label();
             {
                 badge.getStyleClass().add("badge-in-nvram");
             }
@@ -81,11 +85,12 @@ public class ContentListPane extends VBox {
                 if (empty || item == null || item.isEmpty()) {
                     setGraphic(null);
                 } else {
+                    badge.setText(item);
                     setGraphic(badge);
                 }
             }
         });
-        statusCol.setPrefWidth(80);
+        statusCol.setPrefWidth(120);
 
         // Date column
         TableColumn<ContentItem, String> dateCol = new TableColumn<>("Modified");
@@ -120,9 +125,15 @@ public class ContentListPane extends VBox {
     }
 
     /** Set content from library folder entries. */
-    public void setLibraryFiles(List<AppEntry> entries, String folderLabel, Set<String> nvramNames) {
+    public void setLibraryFiles(List<AppEntry> entries, String folderLabel,
+                                Map<String, List<String>> nvramFileMap) {
         items.setAll(entries.stream()
-            .map(e -> (ContentItem) new LibraryItem(e, nvramNames != null && nvramNames.contains(e.name())))
+            .map(e -> {
+                List<String> nvrams = nvramFileMap != null ? nvramFileMap.get(e.name()) : null;
+                String status = (nvrams != null && !nvrams.isEmpty())
+                    ? String.join(", ", nvrams) : "";
+                return (ContentItem) new LibraryItem(e, status);
+            })
             .toList());
         breadcrumb.setText(folderLabel + " - " + entries.size() + " files");
         searchField.clear();

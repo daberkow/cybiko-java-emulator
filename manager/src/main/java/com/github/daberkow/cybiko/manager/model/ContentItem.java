@@ -24,10 +24,11 @@ public sealed interface ContentItem permits ContentItem.NvramItem, ContentItem.L
     }
 
     /** An item from a library folder on disk. */
-    record LibraryItem(AppEntry entry, boolean inNvram) implements ContentItem {
+    record LibraryItem(AppEntry entry, String nvramStatus) implements ContentItem {
         @Override public String name() { return entry.name(); }
         @Override public String extension() { return entry.extension(); }
         @Override public long sizeBytes() { return entry.sizeBytes(); }
         @Override public LocalDateTime lastModified() { return entry.lastModifiedDateTime(); }
+        @Override public boolean inNvram() { return nvramStatus != null && !nvramStatus.isEmpty(); }
     }
 }

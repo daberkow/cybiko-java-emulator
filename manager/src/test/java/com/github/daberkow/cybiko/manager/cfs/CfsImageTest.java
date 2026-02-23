@@ -229,6 +229,30 @@ class CfsImageTest {
     }
 
     @Test
+    void detectGeometryFromNvramDump() {
+        // Emulator saves full 2MB external RAM as NVRAM; should detect as XTREME
+        byte[] data = new byte[2 * 1024 * 1024];
+        assertEquals(FlashGeometry.XTREME, CfsImage.detectGeometry(data));
+    }
+
+    @Test
+    void detectGeometryNvramDumpRoundtrip() {
+        // Create a CFS image, embed it in a 2MB NVRAM dump, and verify files survive
+        CfsImage original = new CfsImage(FlashGeometry.XTREME);
+        original.addFile("hello.app", new byte[]{1, 2, 3, 4, 5});
+        byte[] cfsBytes = original.toBytes();
+
+        byte[] nvram = new byte[2 * 1024 * 1024];
+        System.arraycopy(cfsBytes, 0, nvram, 0, cfsBytes.length);
+
+        CfsImage loaded = new CfsImage(nvram);
+        assertEquals(FlashGeometry.XTREME, loaded.geometry());
+        CfsFile file = loaded.readFile("hello.app");
+        assertNotNull(file);
+        assertArrayEquals(new byte[]{1, 2, 3, 4, 5}, file.data());
+    }
+
+    @Test
     void detectGeometryUnknownThrows() {
         byte[] data = new byte[12345];
         assertThrows(IllegalArgumentException.class, () -> CfsImage.detectGeometry(data));

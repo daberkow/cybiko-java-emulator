@@ -11,3 +11,4 @@ build/
 
 *.nvram
 *.class
+*.bin

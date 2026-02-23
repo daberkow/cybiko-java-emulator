@@ -574,6 +574,17 @@ public class AddressBus {
         // Port DDR registers (0xFFFEB0-0xFFFEBF)
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
             onChipRam.write8(onChipOffset(address), value);
+            // Port F DDR (0xFFFEBE) - V1/V2 I2C SDA is controlled via DDR (open-drain).
+            // V1/V2 CyOS toggles SDA by switching DDR bit 0 between output (1=drive low
+            // via DR=0) and input (0=release high via pull-up). This matches MAME's #if 0
+            // block in cybiko_m.cpp: sda_w((data & PF0) ? 0 : 1).
+            // XT uses DR-only I2C (both SCL and SDA from Port F DR writes), handled below.
+            if (address == 0xFFFEBE && config.type != MachineConfig.MachineType.XT) {
+                // SDA: DDR bit set = output mode, DR=0 drives SDA LOW
+                //       DDR bit clear = input mode, SDA released HIGH (pull-up)
+                boolean sdaHigh = (value & config.rtcSdaWriteBit) == 0;
+                rtc.sda_w(sdaHigh);
+            }
             return;
         }
 
@@ -605,8 +616,13 @@ public class AddressBus {
         // Port F write (0xFFFF6E) - I2C RTC bit-banging
         if (address == 0xFFFF6E) {
             rtc.scl_w((value & config.rtcSclBit) != 0);
-            // SDA write is inverted: writing the bit = pull SDA low
-            rtc.sda_w((value & config.rtcSdaWriteBit) == 0);
+            if (config.type == MachineConfig.MachineType.XT) {
+                // XT: both SCL and SDA are triggered from Port F DR writes.
+                // SDA write is inverted: writing the bit = pull SDA low.
+                rtc.sda_w((value & config.rtcSdaWriteBit) == 0);
+            }
+            // V1/V2: SDA is controlled via DDR (0xFFFEBE), not DR.
+            // Only SCL comes from DR writes. See Port F DDR handler above.
             onChipRam.write8(onChipOffset(address), value);
             return;
         }
@@ -704,8 +720,9 @@ public class AddressBus {
 
         if (count == 0) return;
 
-        if (config.type == MachineConfig.MachineType.V1 && spiFlash != null) {
-            // V1: DTC transfers talk to the SPI flash (AT45DB041) for bulk page reads
+        if (spiFlash != null) {
+            // V1/V2: DTC transfers talk to the SPI flash (AT45DB041) for bulk page reads.
+            // Both V1 and V2 use SPI flash for CFS filesystem (apps, cyos.cfg, etc.)
             if (mra == 0x20 && receiveMode) {
                 // Receive mode: read from SPI flash into destination buffer
                 for (int i = 0; i < count; i++) {
@@ -723,8 +740,7 @@ public class AddressBus {
                 return;
             }
         } else {
-            // V2: SCI1 DTC transfers are for RF chip communication, not flash.
-            // Return 0xFF (idle SPI bus) since RF hardware is not emulated.
+            // No SPI flash available — return idle bus
             if (mra == 0x20 && receiveMode) {
                 for (int i = 0; i < count; i++) {
                     write8(dar + i, 0xFF);
@@ -745,14 +761,16 @@ public class AddressBus {
         onChipRam.write8(onChipOffset(0xFFFF34), dtcer & ~0x02);
 
         if (config.type == MachineConfig.MachineType.V1) {
-            // V1: Fire SCI1 RXI interrupt (vector 85) for completion handler.
-            // Use deferred delivery so the interrupt arrives after the caller
-            // has re-enabled interrupts.
+            // V1: Fire SCI1 RXI interrupt (vector 85) for completion.
             dtcCompletionDelay = 5;
         } else {
-            // V2: Directly perform the SCI1 RXI completion handler's work.
-            // The V2 ISR at 0x1085E0 does: disable SCI1, re-enable basic mode,
-            // clear RDRF/ORER, write completion flag at 0x20023C.
+            // V2: Set the completion flag directly. Firing vector 85 on V2 causes
+            // corrupted task pointers (0xCA0000) in the RTOS scheduler — the V2
+            // interrupt handler or vector table setup is incompatible.
+            // The ISR at 0x1085E0 (via 0xFFECA0 trampoline) does:
+            //   1. Disable SCI1 (SCR = 0), re-enable basic mode (SCR = 0x30)
+            //   2. Clear RDRF and ORER in SCI1 SSR
+            //   3. Write 0x01 to completion flag at 0x20023C
             onChipRam.write8(onChipOffset(0xFFFF82), 0x00);
             onChipRam.write8(onChipOffset(0xFFFF82), 0x30);
             int ssr = onChipRam.read8(onChipOffset(0xFFFF84));

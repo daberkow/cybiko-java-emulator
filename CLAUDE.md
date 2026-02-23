@@ -267,6 +267,16 @@ two hashes as the clock colon blinks. All hashes confirmed by user on GUI displa
 | 5 | ~480-540 | F48DA453 | CyOS initialization | 0x219C8E (halted) |
 | 6 | ~660+ | EFD624A8 | Final screen (CyOS UI) | 0x219C8E (halted) |
 
+### V2 Boot Phases
+| Phase | Frames | VRAM Hash  | Description | PC |
+|-------|--------|------------|-------------|-----|
+| 1 | ~1-60 | 4ACC524E | SPI flash loading (dot pattern) | 0x108720 |
+| 2 | ~1080 | A6642987 | Transitional (CyOS init) | 0x108D2A |
+| 3 | ~1140+ | C0DBEF72 | Animated Cybiko logo (same as XT/V1) | 0x11ED98 (halted) |
+
+V2 currently stalls at phase 3 (Cybiko logo). The desktop app never starts because
+RF hardware init never completes. Service stub resolves non-RF set_task_state calls.
+
 ## Bugs Found & Fixed
 
 ### 1. LCD alternating black rows
@@ -363,20 +373,19 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   MAME itself has `m_inp = 0` with a FIXME comment saying "sda should default 1
   not 0" - our old working code got this right with `sdaOut = true`.
 
-### 10. I2C separate SCL/SDA triggers broke boot (REVERTED)
-- **Attempted**: Split I2C triggering so SCL comes from DR (0xFFFF6E) and SDA from
-  DDR (0xFFFEBE), matching MAME's `#if 0` block in cybiko_m.cpp. Also changed register
-  pointer masking from `& 0x0F` to `& 0xFF` to handle alarm register addresses (0x80+).
-- **Result**: CyOS never progressed past boot phase 3 (animated logo). Multiple
-  iterations of fixes (open-drain model, hybrid pin ordering, DDR-based SDA) all
-  failed to produce a working I2C read sequence. The clock display remained broken.
-- **Reverted to**: d75fd54 approach where BOTH SCL and SDA are triggered from Port F
-  DR writes (0xFFFF6E). This is simpler and works reliably for boot. The RTC clock
-  display still shows wrong values but CyOS boots fully.
-- **Lesson**: Sometimes the simpler approach works even if it doesn't match the
-  hardware exactly. The d75fd54 I2C model works because CyOS's bit-bang sequence
-  writes both SCL and SDA bits to the DR in the same byte write, so triggering both
-  from DR captures the correct state transitions. Revisit I2C if clock accuracy needed.
+### 10. I2C SDA routing differs between XT and V1/V2 (FIXED)
+- **Symptom**: V2 produced zero I2C transactions during boot. XT worked fine.
+- **Root cause**: V1/V2 CyOS uses the open-drain I2C model where SDA is controlled
+  via Port F DDR (0xFFFEBE), not DR (0xFFFF6E). DDR bit 0 = output mode drives SDA
+  low (via DR=0); DDR bit 0 = input mode releases SDA high (via pull-up). XT writes
+  both SCL and SDA to DR in the same byte write. Our code only triggered the RTC
+  from DR writes, so V1/V2 I2C was completely silent.
+- **Fix**: Machine-specific I2C routing in AddressBus.java:
+  - V1/V2: SDA triggered from Port F DDR (0xFFFEBE) writes; SCL from DR (0xFFFF6E)
+  - XT: Both SCL and SDA triggered from Port F DR writes (0xFFFF6E)
+- **Result**: V2 now has full I2C transactions matching the CyOS RTC protocol:
+  boot init reads all 16 registers, writes defaults (control=0x84, time=Jan 1 00:00:00),
+  then starts counting (control=0x04).
 
 ### 11. Timer isRunning() snapshot broke Timer8_1 mid-frame start
 - **Symptom**: CyOS stuck at logo screen (boot phase 3). Timer8_0 interrupts fire
@@ -425,22 +434,20 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   uses polled SCI for command bytes, then switches to DTC for bulk data transfer.
 
 ## Known Issues
-- **RTC clock display wrong**: CyOS shows incorrect date/time. The I2C protocol works
-  for basic transactions but the clock values aren't correct. The d75fd54-style I2C
-  (both SCL/SDA from Port F DR) may not properly handle all CyOS read sequences.
-  Needs investigation.
 - **Fn+number keys intermittent**: Number keys (Fn+letter combos) work ~80-90% of the
   time but occasionally produce the letter instead. SwingRenderer uses queue-based
   delayed Fn+letter injection (Fn pressed first, letter delayed 3-4 frames) but fast
   typing can still race with CyOS's DMA keyboard scan. Root cause is thread
   synchronization: Swing EDT modifies key matrix while emulation thread reads it.
   Performance is not the bottleneck (~4ms/frame, 24% of budget).
-- **V2 CyOS stuck at splash**: Boot ROM draws test pattern, CyOS starts 6 tasks and
-  reaches splash screen (VRAM hash 0x79960305) but never progresses to desktop. Two
-  blocking issues: (1) multi-page SPI flash file I/O blocks the UI task reading
-  "cyos.cfg", and (2) the desktop app never starts because RF hardware init never
-  completes (entry[0x91] stays 0, all display rendering skipped). See V2 Investigation
-  below. MAME also cannot fully boot V2 CyOS with these ROMs.
+- **V2 CyOS stuck at Cybiko logo**: V2 boots through SPI flash loading, reaches the
+  animated Cybiko logo (VRAM hash C0DBEF72, same as V1/XT) but never progresses to
+  desktop. I2C RTC communication now works (bug #10 fix), but the desktop app never
+  starts because RF hardware init never completes (entry[0x91] stays 0, all display
+  rendering skipped). A service stub auto-resolves non-RF set_task_state calls to
+  bypass startup waits. The RF object (0x202CB2) must never be resolved via stub —
+  causes failed HW init. See V2 Investigation below. MAME also cannot fully boot V2
+  CyOS with these ROMs.
 
 ## Current Status
 - Multi-machine support: V1 (Classic), V2, and XT (Xtreme) selectable via --machine flag
@@ -448,7 +455,7 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - V1 CyOS fully boots from SPI flash (AT45DB041 + DTC bulk transfer) to interactive UI
 - Keyboard input works (letters, navigation keys, Fn+letter for numbers on XT, dedicated numbers on V1)
 - Minimum key hold time (3 frames) prevents fast key presses from being missed
-- RTC I2C protocol handles basic transactions; clock display shows wrong values (known issue)
+- RTC I2C protocol works on all variants (V1/V2 use DDR-based SDA, XT uses DR-based SDA)
 - LCD renders full CyOS UI with menus and text input
 - Timer8 and Timer16 interrupts drive the OS scheduler
 - DMA controller handles keyboard matrix scans (XT only; V1/V2 use direct reads)
@@ -577,12 +584,11 @@ Real-time clock connected via I2C bit-bang on Port F.
 ### Port F Pin Wiring
 **Xtreme**: SCL = bit 1 (0x02), SDA write = bit 6 (0x40, inverted), SDA read = bit 6
 **V1/V2**: SCL = bit 1 (0x02), SDA write = bit 0 (0x01, inverted), SDA read = bit 0
-- **SCL**: Port F DR (0xFFFF6E), direct polarity
-- **SDA write**: Port F DR (0xFFFF6E), **inverted** (bit set = SDA low)
+- **SCL**: Port F DR (0xFFFF6E), direct polarity (all variants)
+- **SDA write (XT)**: Port F DR (0xFFFF6E), **inverted** (bit set = SDA low)
+- **SDA write (V1/V2)**: Port F DDR (0xFFFEBE), open-drain model:
+  DDR bit = output (1) drives SDA low via DR=0; DDR bit = input (0) releases SDA high
 - **SDA readback**: Port F input register (0xFFFF5E), NOT inverted
-- Both SCL and SDA are triggered from the same Port F DR write (d75fd54 approach).
-  An attempt to split them (SCL from DR, SDA from DDR per MAME's `#if 0` block)
-  broke CyOS boot and was reverted (see bug #10).
 - Note: MAME has `m_inp = 0` default with FIXME "sda should default 1 not 0".
   Our `inp` must be 1 (idle high) or CyOS fails to boot (see bug #9).
 

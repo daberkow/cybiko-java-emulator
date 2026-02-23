@@ -3,13 +3,16 @@ package com.github.daberkow.cybiko.manager;
 import com.github.daberkow.cybiko.manager.cfs.*;
 import com.github.daberkow.cybiko.manager.io.LibraryConfig;
 import com.github.daberkow.cybiko.manager.io.LibraryScanner;
+import com.github.daberkow.cybiko.manager.io.RecentFiles;
 import com.github.daberkow.cybiko.manager.model.*;
 import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
 import com.github.daberkow.cybiko.manager.model.ContentItem.NvramItem;
 import com.github.daberkow.cybiko.manager.ui.*;
 import javafx.scene.control.*;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.Region;
 import javafx.stage.FileChooser;
+import javafx.stage.Modality;
 import javafx.stage.Stage;
 
 import java.io.File;
@@ -43,6 +46,10 @@ public class MainWindow extends BorderPane {
     private final Map<LibraryFolder, List<AppEntry>> libraryCache = new HashMap<>();
     private LibraryFolder currentLibraryFolder;
 
+    // Recent files
+    private List<Path> recentPaths = new ArrayList<>();
+    private Menu recentMenu;
+
     public MainWindow(Stage stage) {
         this.stage = stage;
 
@@ -72,6 +79,7 @@ public class MainWindow extends BorderPane {
 
         sidebar.setOnAddLibraryFolder(this::addLibraryFolder);
         sidebar.setOnRemoveLibraryFolder(this::removeLibraryFolder);
+        sidebar.setOnCloseNvram(this::closeNvram);
 
         // Wire content list selection
         contentList.setOnItemSelected(item -> detail.showItem(item));
@@ -84,6 +92,10 @@ public class MainWindow extends BorderPane {
         // Load library config
         libraryFolders = LibraryConfig.load();
         sidebar.setLibraryFolders(libraryFolders);
+
+        // Load recent files
+        recentPaths = RecentFiles.load();
+        rebuildRecentMenu();
     }
 
     private MenuBar createMenuBar() {
@@ -108,15 +120,26 @@ public class MainWindow extends BorderPane {
         MenuItem saveAsItem = new MenuItem("Save As...");
         saveAsItem.setOnAction(e -> saveFileAs());
 
+        recentMenu = new Menu("Open Recent");
+
+        MenuItem closeItem = new MenuItem("Close");
+        closeItem.setOnAction(e -> {
+            SidebarPane.ImageEntry entry = sidebar.getSelectedEntry();
+            if (entry != null) closeNvram(entry);
+        });
+
         MenuItem exitItem = new MenuItem("Exit");
         exitItem.setOnAction(e -> stage.close());
 
         fileMenu.getItems().addAll(
             openItem,
+            recentMenu,
             new SeparatorMenuItem(),
             newXtItem, newV1Item, newV2Item,
             new SeparatorMenuItem(),
             saveItem, saveAsItem,
+            new SeparatorMenuItem(),
+            closeItem,
             new SeparatorMenuItem(),
             exitItem
         );
@@ -198,10 +221,94 @@ public class MainWindow extends BorderPane {
             currentViewMode = ViewMode.NVRAM;
             detail.setNvramAvailable(true);
             refreshFileList();
+            addToRecentFiles(path);
             updateTitle();
         } catch (Exception ex) {
             showError("Failed to open image", ex.getMessage());
         }
+    }
+
+    private void openFilePath(Path path) {
+        try {
+            CfsImage image = CfsReader.read(path);
+            sidebar.addImage(path, image);
+            currentImage = image;
+            currentPath = path;
+            currentViewMode = ViewMode.NVRAM;
+            detail.setNvramAvailable(true);
+            refreshFileList();
+            addToRecentFiles(path);
+            updateTitle();
+        } catch (Exception ex) {
+            showError("Failed to open image", ex.getMessage());
+        }
+    }
+
+    private void closeNvram(SidebarPane.ImageEntry entry) {
+        if (entry.image().isModified()) {
+            String name = entry.path() != null ? entry.path().getFileName().toString() : entry.displayName();
+            Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+            alert.setTitle("Unsaved Changes");
+            alert.setHeaderText("Save changes to " + name + "?");
+            alert.setContentText("Your changes will be lost if you don't save them.");
+
+            ButtonType saveBtn = new ButtonType("Save");
+            ButtonType dontSaveBtn = new ButtonType("Don't Save");
+            ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+            alert.getButtonTypes().setAll(saveBtn, dontSaveBtn, cancelBtn);
+
+            Optional<ButtonType> result = alert.showAndWait();
+            if (result.isEmpty() || result.get() == cancelBtn) return;
+            if (result.get() == saveBtn) {
+                currentImage = entry.image();
+                currentPath = entry.path();
+                sidebar.selectNvramEntry(entry.image());
+                saveFile();
+                if (entry.image().isModified()) return; // save failed or cancelled
+            }
+        }
+
+        sidebar.removeImage(entry.image());
+        if (currentImage == entry.image()) {
+            currentImage = null;
+            currentPath = null;
+            contentList.clear();
+            capacityBar.update(null);
+            detail.showItem(null);
+        }
+        updateTitle();
+    }
+
+    private void addToRecentFiles(Path path) {
+        recentPaths = RecentFiles.addRecent(recentPaths, path);
+        try {
+            RecentFiles.save(recentPaths);
+        } catch (Exception ignored) {}
+        rebuildRecentMenu();
+    }
+
+    private void rebuildRecentMenu() {
+        recentMenu.getItems().clear();
+        if (recentPaths.isEmpty()) {
+            recentMenu.setDisable(true);
+            return;
+        }
+        recentMenu.setDisable(false);
+        for (Path p : recentPaths) {
+            MenuItem item = new MenuItem(p.toString());
+            item.setOnAction(e -> openFilePath(p));
+            recentMenu.getItems().add(item);
+        }
+        recentMenu.getItems().add(new SeparatorMenuItem());
+        MenuItem clearItem = new MenuItem("Clear Recent");
+        clearItem.setOnAction(e -> {
+            recentPaths = new ArrayList<>();
+            try {
+                RecentFiles.save(recentPaths);
+            } catch (Exception ignored) {}
+            rebuildRecentMenu();
+        });
+        recentMenu.getItems().add(clearItem);
     }
 
     private void newImage(FlashGeometry geom) {
@@ -234,6 +341,7 @@ public class MainWindow extends BorderPane {
         try {
             CfsWriter.write(currentImage, currentPath);
             currentImage.clearModified();
+            sidebar.clearChangeCounts(currentImage);
             updateTitle();
         } catch (Exception ex) {
             showError("Failed to save image", ex.getMessage());
@@ -269,7 +377,9 @@ public class MainWindow extends BorderPane {
             currentPath = file.toPath();
             CfsWriter.write(currentImage, currentPath);
             currentImage.clearModified();
+            sidebar.clearChangeCounts(currentImage);
             sidebar.updateSelected(currentPath);
+            addToRecentFiles(currentPath);
             updateTitle();
         } catch (Exception ex) {
             showError("Failed to save image", ex.getMessage());
@@ -313,8 +423,8 @@ public class MainWindow extends BorderPane {
             currentLibraryFolder, LibraryScanner::scan
         );
 
-        Set<String> nvramNames = getNvramFileNames();
-        contentList.setLibraryFiles(entries, currentLibraryFolder.label(), nvramNames);
+        Map<String, List<String>> nvramFileMap = getNvramFileMap();
+        contentList.setLibraryFiles(entries, currentLibraryFolder.label(), nvramFileMap);
         capacityBar.update(currentImage);
         detail.showItem(null);
         detail.setNvramAvailable(currentImage != null);
@@ -328,13 +438,56 @@ public class MainWindow extends BorderPane {
         }
     }
 
+    /**
+     * Pick which NVRAM image to target for an add operation.
+     * Returns the image directly if only one is open, shows a picker if multiple,
+     * or null if none are open or user cancelled.
+     */
+    private CfsImage pickTargetNvram() {
+        List<SidebarPane.ImageEntry> entries = sidebar.getNvramEntries();
+        if (entries.isEmpty()) {
+            showError("No NVRAM Image", "Open or create an NVRAM image first.");
+            return null;
+        }
+        if (entries.size() == 1) {
+            return entries.get(0).image();
+        }
+
+        // Multiple NVRAMs open — use Dialog+ComboBox (avoids ChoiceDialog resizing parent)
+        Dialog<SidebarPane.ImageEntry> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.initModality(Modality.WINDOW_MODAL);
+        dialog.setResizable(false);
+        dialog.setTitle("Select NVRAM");
+        dialog.setHeaderText("Multiple NVRAM images are open.");
+
+        ComboBox<SidebarPane.ImageEntry> combo = new ComboBox<>();
+        combo.getItems().addAll(entries);
+        combo.setValue(entries.stream()
+            .filter(e -> e.image() == currentImage).findFirst().orElse(entries.get(0)));
+        combo.setMinWidth(Region.USE_PREF_SIZE);
+
+        Label label = new Label("Add to:");
+        javafx.scene.layout.HBox content = new javafx.scene.layout.HBox(8, label, combo);
+        content.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        content.setPadding(new javafx.geometry.Insets(10));
+        dialog.getDialogPane().setContent(content);
+
+        ButtonType okBtn = new ButtonType("OK", ButtonBar.ButtonData.OK_DONE);
+        ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().addAll(okBtn, cancelBtn);
+
+        dialog.setResultConverter(btn -> btn == okBtn ? combo.getValue() : null);
+
+        Optional<SidebarPane.ImageEntry> result = dialog.showAndWait();
+        return result.map(SidebarPane.ImageEntry::image).orElse(null);
+    }
+
     // ---- NVRAM operations ----
 
     private void addFileToNvram() {
-        if (currentImage == null) {
-            showError("No NVRAM Image", "Open or create an NVRAM image first.");
-            return;
-        }
+        CfsImage targetImage = pickTargetNvram();
+        if (targetImage == null) return;
 
         FileChooser chooser = new FileChooser();
         chooser.setTitle("Add File to NVRAM");
@@ -348,11 +501,17 @@ public class MainWindow extends BorderPane {
         try {
             byte[] data = Files.readAllBytes(file.toPath());
             String name = file.getName();
-            if (!currentImage.addFile(name, data)) {
+            if (!targetImage.addFile(name, data)) {
                 showError("Add Failed", "Not enough space or filename too long.");
                 return;
             }
-            afterNvramModification();
+            sidebar.recordAdd(targetImage);
+            if (targetImage == currentImage) {
+                afterNvramModification();
+            } else {
+                sidebar.refreshEntry(targetImage);
+                updateTitle();
+            }
         } catch (Exception ex) {
             showError("Failed to add file", ex.getMessage());
         }
@@ -372,20 +531,28 @@ public class MainWindow extends BorderPane {
             }
         }
         if (count > 0) {
+            sidebar.recordRemove(currentImage, count);
             afterNvramModification();
         }
     }
 
     private void addLibraryItemToNvram(LibraryItem item) {
-        if (currentImage == null) return;
+        CfsImage targetImage = pickTargetNvram();
+        if (targetImage == null) return;
 
         try {
             byte[] data = Files.readAllBytes(item.entry().path());
-            if (!currentImage.addFile(item.entry().name(), data)) {
+            if (!targetImage.addFile(item.entry().name(), data)) {
                 showError("Add Failed", "Not enough space or filename too long.");
                 return;
             }
-            afterNvramModification();
+            sidebar.recordAdd(targetImage);
+            if (targetImage == currentImage) {
+                afterNvramModification();
+            } else {
+                sidebar.refreshEntry(targetImage);
+                updateTitle();
+            }
             // Refresh library view to update "In NVRAM" status
             if (currentViewMode == ViewMode.LIBRARY) {
                 refreshLibraryView();
@@ -399,6 +566,7 @@ public class MainWindow extends BorderPane {
         if (currentImage == null) return;
 
         currentImage.deleteFile(item.file().name());
+        sidebar.recordRemove(currentImage, 1);
         afterNvramModification();
     }
 
@@ -640,13 +808,18 @@ public class MainWindow extends BorderPane {
         detail.showItem(null);
     }
 
-    private Set<String> getNvramFileNames() {
-        if (currentImage == null) return Set.of();
-        Set<String> names = new HashSet<>();
-        for (CfsFile f : currentImage.listFiles()) {
-            names.add(f.name());
+    /**
+     * Returns a map from filename -> list of NVRAM display names that contain it.
+     */
+    private Map<String, List<String>> getNvramFileMap() {
+        Map<String, List<String>> map = new HashMap<>();
+        for (SidebarPane.ImageEntry entry : sidebar.getNvramEntries()) {
+            String nvramName = entry.displayName();
+            for (CfsFile f : entry.image().listFiles()) {
+                map.computeIfAbsent(f.name(), k -> new ArrayList<>()).add(nvramName);
+            }
         }
-        return names;
+        return map;
     }
 
     // ---- Title and unsaved changes ----

@@ -20,6 +20,8 @@ public class App extends Application {
 
         primaryStage.setTitle("Cybiko NVRAM Manager");
         primaryStage.setScene(scene);
+        primaryStage.setMinWidth(800);
+        primaryStage.setMinHeight(500);
 
         // Prompt for unsaved changes on close
         primaryStage.setOnCloseRequest(event -> {

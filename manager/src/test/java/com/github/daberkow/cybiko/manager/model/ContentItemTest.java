@@ -32,7 +32,7 @@ class ContentItemTest {
     @Test
     void libraryItemDelegatesToAppEntry() {
         AppEntry entry = new AppEntry(Path.of("/apps/calc.app"), "calc.app", 2048, Instant.now());
-        LibraryItem item = new LibraryItem(entry, false);
+        LibraryItem item = new LibraryItem(entry, "");
 
         assertEquals("calc.app", item.name());
         assertEquals("app", item.extension());
@@ -43,18 +43,28 @@ class ContentItemTest {
     @Test
     void libraryItemInNvramWhenFlagged() {
         AppEntry entry = new AppEntry(Path.of("/apps/dice.app"), "dice.app", 1024, Instant.now());
-        LibraryItem inNvram = new LibraryItem(entry, true);
-        LibraryItem notInNvram = new LibraryItem(entry, false);
+        LibraryItem inNvram = new LibraryItem(entry, "cybiko.nvram");
+        LibraryItem notInNvram = new LibraryItem(entry, "");
 
         assertTrue(inNvram.inNvram());
         assertFalse(notInNvram.inNvram());
     }
 
     @Test
+    void libraryItemNvramStatusShowsImageNames() {
+        AppEntry entry = new AppEntry(Path.of("/apps/dice.app"), "dice.app", 1024, Instant.now());
+        LibraryItem single = new LibraryItem(entry, "cybiko.nvram");
+        LibraryItem multi = new LibraryItem(entry, "cybiko.nvram, test.nvram");
+
+        assertEquals("cybiko.nvram", single.nvramStatus());
+        assertEquals("cybiko.nvram, test.nvram", multi.nvramStatus());
+    }
+
+    @Test
     void libraryItemLastModifiedMatchesEntry() {
         Instant now = Instant.now();
         AppEntry entry = new AppEntry(Path.of("/apps/game.app"), "game.app", 512, now);
-        LibraryItem item = new LibraryItem(entry, false);
+        LibraryItem item = new LibraryItem(entry, "");
 
         assertEquals(entry.lastModifiedDateTime(), item.lastModified());
     }

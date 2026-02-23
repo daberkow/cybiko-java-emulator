@@ -247,6 +247,14 @@ public class CfsImage {
     public static FlashGeometry detectGeometry(byte[] data) {
         FlashGeometry geom = FlashGeometry.fromFileSize(data.length);
         if (geom != null) return geom;
+
+        // Recognize raw NVRAM dumps from the emulator (full external RAM saves).
+        // The CFS image sits at offset 0 in external RAM.
+        // Xtreme: 2MB external RAM (2,097,152 bytes) contains XTREME CFS at offset 0.
+        if (data.length == 2 * 1024 * 1024) {
+            return FlashGeometry.XTREME;
+        }
+
         throw new IllegalArgumentException("Cannot detect CFS geometry from file size: " + data.length);
     }
 
