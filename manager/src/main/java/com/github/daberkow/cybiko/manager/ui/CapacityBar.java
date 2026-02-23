@@ -21,6 +21,7 @@ public class CapacityBar extends HBox {
         setAlignment(Pos.CENTER_LEFT);
         setSpacing(10);
         setPadding(new Insets(6, 10, 6, 10));
+        getStyleClass().add("capacity-bar");
 
         progressBar.setPrefWidth(200);
         progressBar.setMaxWidth(300);
@@ -34,7 +35,7 @@ public class CapacityBar extends HBox {
         getChildren().addAll(progressBar, usageLabel, spacer, geomLabel);
     }
 
-    public void update(CfsImage image) {
+    public void update(CfsImage image, String imageName) {
         if (image == null) {
             progressBar.setProgress(0);
             usageLabel.setText("No image");
@@ -47,8 +48,10 @@ public class CapacityBar extends HBox {
         double ratio = total > 0 ? (double) used / total : 0;
 
         progressBar.setProgress(ratio);
-        usageLabel.setText(String.format("%d KB / %d KB (%d%%)",
-            used / 1024, total / 1024, Math.round(ratio * 100)));
+        int fileCount = image.listFiles().size();
+        String prefix = (imageName != null && !imageName.isEmpty()) ? imageName + " — " : "";
+        usageLabel.setText(String.format("%s%d files | %d KB / %d KB (%d%%)",
+            prefix, fileCount, used / 1024, total / 1024, Math.round(ratio * 100)));
         geomLabel.setText(image.geometry().name());
     }
 }

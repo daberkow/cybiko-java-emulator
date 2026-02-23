@@ -18,6 +18,14 @@ public class App extends Application {
         String css = getClass().getResource("css/dark-theme.css").toExternalForm();
         scene.getStylesheets().add(css);
 
+        // Ctrl+F / Cmd+F to open search
+        scene.getAccelerators().put(
+            new javafx.scene.input.KeyCodeCombination(
+                javafx.scene.input.KeyCode.F,
+                javafx.scene.input.KeyCombination.SHORTCUT_DOWN),
+            mainWindow::showSearch
+        );
+
         primaryStage.setTitle("Cybiko NVRAM Manager");
         primaryStage.setScene(scene);
         primaryStage.setMinWidth(800);

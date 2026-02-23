@@ -4,9 +4,11 @@ import com.github.daberkow.cybiko.manager.cfs.CfsImage;
 import com.github.daberkow.cybiko.manager.model.LibraryFolder;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
+import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 
 import java.nio.file.Path;
@@ -61,6 +63,7 @@ public class SidebarPane extends VBox {
     public SidebarPane() {
         setPrefWidth(200);
         setMinWidth(150);
+        getStyleClass().add("sidebar");
 
         // --- NVRAM section ---
         Label nvramHeader = new Label("NVRAM IMAGES");
@@ -75,6 +78,14 @@ public class SidebarPane extends VBox {
                     if (empty || item == null) {
                         setGraphic(null);
                     } else {
+                        HBox row = new HBox(8);
+                        row.setAlignment(Pos.CENTER_LEFT);
+
+                        Region dot = new Region();
+                        dot.getStyleClass().add(item.image().isModified() ? "dot-modified" : "dot-saved");
+                        dot.setMinSize(8, 8);
+                        dot.setMaxSize(8, 8);
+
                         VBox box = new VBox(2);
                         Label name = new Label(item.displayName());
                         name.getStyleClass().add("detail-value");
@@ -91,7 +102,9 @@ public class SidebarPane extends VBox {
                         Label info = new Label(infoText.toString());
                         info.getStyleClass().add("detail-label");
                         box.getChildren().addAll(name, info);
-                        setGraphic(box);
+
+                        row.getChildren().addAll(dot, box);
+                        setGraphic(row);
                     }
                 }
             };

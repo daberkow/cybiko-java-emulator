@@ -49,6 +49,7 @@ public class DetailPane extends VBox {
         setPrefWidth(250);
         setMinWidth(200);
         setPadding(new Insets(8));
+        getStyleClass().add("detail-panel");
 
         Label header = new Label("FILE DETAILS");
         header.getStyleClass().add("section-header");
@@ -82,7 +83,7 @@ public class DetailPane extends VBox {
             }
         });
 
-        viewHexBtn.getStyleClass().add("action-button");
+        viewHexBtn.getStyleClass().add("action-button-secondary");
         viewHexBtn.setOnAction(e -> {
             if (currentItem != null && onViewHex != null) {
                 onViewHex.accept(currentItem);

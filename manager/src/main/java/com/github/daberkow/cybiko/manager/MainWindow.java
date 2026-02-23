@@ -273,7 +273,7 @@ public class MainWindow extends BorderPane {
             currentImage = null;
             currentPath = null;
             contentList.clear();
-            capacityBar.update(null);
+            capacityBar.update(null, null);
             detail.showItem(null);
         }
         updateTitle();
@@ -425,7 +425,7 @@ public class MainWindow extends BorderPane {
 
         Map<String, List<String>> nvramFileMap = getNvramFileMap();
         contentList.setLibraryFiles(entries, currentLibraryFolder.label(), nvramFileMap);
-        capacityBar.update(currentImage);
+        capacityBar.update(currentImage, currentImage != null ? currentImageName() : null);
         detail.showItem(null);
         detail.setNvramAvailable(currentImage != null);
     }
@@ -575,7 +575,7 @@ public class MainWindow extends BorderPane {
             refreshFileList();
         }
         sidebar.refreshSelectedEntry();
-        capacityBar.update(currentImage);
+        capacityBar.update(currentImage, currentImageName());
         detail.showItem(null);
         updateTitle();
     }
@@ -796,15 +796,15 @@ public class MainWindow extends BorderPane {
     private void refreshFileList() {
         if (currentImage == null) {
             contentList.clear();
-            capacityBar.update(null);
+            capacityBar.update(null, null);
             detail.showItem(null);
             return;
         }
 
         List<CfsFile> files = currentImage.listFiles();
-        String name = currentPath != null ? currentPath.getFileName().toString() : "Untitled";
+        String name = currentImageName();
         contentList.setNvramFiles(files, name);
-        capacityBar.update(currentImage);
+        capacityBar.update(currentImage, name);
         detail.showItem(null);
     }
 
@@ -876,6 +876,16 @@ public class MainWindow extends BorderPane {
             }
         }
         return true;
+    }
+
+    public void showSearch() {
+        contentList.showSearch();
+    }
+
+    private String currentImageName() {
+        if (currentPath != null) return currentPath.getFileName().toString();
+        SidebarPane.ImageEntry entry = sidebar.getSelectedEntry();
+        return (entry != null) ? entry.displayName() : "Untitled";
     }
 
     private void showError(String title, String message) {

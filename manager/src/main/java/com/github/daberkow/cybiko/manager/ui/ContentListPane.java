@@ -10,7 +10,11 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
 import javafx.collections.transformation.SortedList;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.control.*;
+import javafx.scene.input.KeyCode;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
@@ -28,15 +32,29 @@ public class ContentListPane extends VBox {
 
     private final Label breadcrumb = new Label("No image loaded");
     private final TextField searchField = new TextField();
+    private final Button searchToggle = new Button("Search");
+    private final Button searchClose = new Button("X");
+    private final HBox headerBar = new HBox(8);
+    private final HBox searchBar = new HBox(8);
+    private boolean searchVisible = false;
     private final TableView<ContentItem> table = new TableView<>();
     private final ObservableList<ContentItem> items = FXCollections.observableArrayList();
     private final FilteredList<ContentItem> filteredItems = new FilteredList<>(items, p -> true);
 
     @SuppressWarnings("unchecked")
     public ContentListPane() {
+        // Header bar with breadcrumb and search toggle
         breadcrumb.getStyleClass().add("breadcrumb");
         breadcrumb.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(breadcrumb, Priority.ALWAYS);
 
+        searchToggle.getStyleClass().add("search-toggle");
+        searchToggle.setOnAction(e -> toggleSearch());
+
+        headerBar.setAlignment(Pos.CENTER_LEFT);
+        headerBar.getChildren().addAll(breadcrumb, searchToggle);
+
+        // Search bar (initially hidden)
         searchField.setPromptText("Search...");
         searchField.getStyleClass().add("search-field");
         searchField.textProperty().addListener((obs, oldVal, newVal) -> {
@@ -45,6 +63,17 @@ public class ContentListPane extends VBox {
                 filter.isEmpty() || item.name().toLowerCase().contains(filter)
             );
         });
+        searchField.setOnKeyPressed(e -> {
+            if (e.getCode() == KeyCode.ESCAPE) toggleSearch();
+        });
+        HBox.setHgrow(searchField, Priority.ALWAYS);
+
+        searchClose.getStyleClass().add("search-toggle");
+        searchClose.setOnAction(e -> toggleSearch());
+
+        searchBar.setPadding(new Insets(4, 12, 4, 12));
+        searchBar.setAlignment(Pos.CENTER_LEFT);
+        searchBar.getChildren().addAll(searchField, searchClose);
 
         // Name column
         TableColumn<ContentItem, String> nameCol = new TableColumn<>("Name");
@@ -111,8 +140,26 @@ public class ContentListPane extends VBox {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         table.setPlaceholder(new Label("No files"));
 
-        getChildren().addAll(breadcrumb, searchField, table);
+        getChildren().addAll(headerBar, table);
         VBox.setVgrow(table, Priority.ALWAYS);
+    }
+
+    private void toggleSearch() {
+        searchVisible = !searchVisible;
+        if (searchVisible) {
+            if (!getChildren().contains(searchBar)) {
+                getChildren().add(1, searchBar); // between header and table
+            }
+            searchField.requestFocus();
+        } else {
+            getChildren().remove(searchBar);
+            searchField.clear();
+        }
+    }
+
+    public void showSearch() {
+        if (!searchVisible) toggleSearch();
+        else searchField.requestFocus();
     }
 
     /** Set content from NVRAM image files. */
@@ -147,7 +194,7 @@ public class ContentListPane extends VBox {
     public void clear() {
         items.clear();
         breadcrumb.setText("No image loaded");
-        searchField.clear();
+        if (searchVisible) toggleSearch();
     }
 
     /** Get all selected items (supports multi-select). */
