@@ -18,6 +18,7 @@ public final class LibraryConfig {
 
     private static final Path CONFIG_DIR = Path.of(System.getProperty("user.home"), ".cybiko-manager");
     private static final Path CONFIG_FILE = CONFIG_DIR.resolve("library.properties");
+    private static final Path THEME_FILE = CONFIG_DIR.resolve("theme.properties");
 
     private LibraryConfig() {}
 
@@ -76,6 +77,29 @@ public final class LibraryConfig {
 
         try (Writer writer = Files.newBufferedWriter(configFile)) {
             props.store(writer, "Cybiko NVRAM Manager - Library Folders");
+        }
+    }
+
+    /** Load saved theme preference. Returns "dark" or "light", defaults to "dark". */
+    public static String loadTheme() {
+        if (!Files.exists(THEME_FILE)) return "dark";
+        Properties props = new Properties();
+        try (Reader reader = Files.newBufferedReader(THEME_FILE)) {
+            props.load(reader);
+        } catch (IOException e) {
+            return "dark";
+        }
+        String theme = props.getProperty("theme", "dark");
+        return "light".equals(theme) ? "light" : "dark";
+    }
+
+    /** Save theme preference ("dark" or "light"). */
+    public static void saveTheme(String themeName) throws IOException {
+        Files.createDirectories(THEME_FILE.getParent());
+        Properties props = new Properties();
+        props.setProperty("theme", themeName);
+        try (Writer writer = Files.newBufferedWriter(THEME_FILE)) {
+            props.store(writer, "Cybiko NVRAM Manager - Theme Preference");
         }
     }
 }

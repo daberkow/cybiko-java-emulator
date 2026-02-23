@@ -1,5 +1,8 @@
 package com.github.daberkow.cybiko.manager;
 
+import atlantafx.base.theme.PrimerDark;
+import atlantafx.base.theme.PrimerLight;
+import com.github.daberkow.cybiko.manager.io.LibraryConfig;
 import javafx.application.Application;
 import javafx.scene.Scene;
 import javafx.stage.Stage;
@@ -11,7 +14,14 @@ public class App extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        MainWindow mainWindow = new MainWindow(primaryStage);
+        String themeName = LibraryConfig.loadTheme();
+        if ("light".equals(themeName)) {
+            Application.setUserAgentStylesheet(new PrimerLight().getUserAgentStylesheet());
+        } else {
+            Application.setUserAgentStylesheet(new PrimerDark().getUserAgentStylesheet());
+        }
+
+        MainWindow mainWindow = new MainWindow(primaryStage, themeName);
 
         Scene scene = new Scene(mainWindow, 1000, 700);
 

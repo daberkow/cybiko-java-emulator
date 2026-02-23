@@ -1,5 +1,7 @@
 package com.github.daberkow.cybiko.manager;
 
+import atlantafx.base.theme.PrimerDark;
+import atlantafx.base.theme.PrimerLight;
 import com.github.daberkow.cybiko.manager.cfs.*;
 import com.github.daberkow.cybiko.manager.io.LibraryConfig;
 import com.github.daberkow.cybiko.manager.io.LibraryScanner;
@@ -8,6 +10,7 @@ import com.github.daberkow.cybiko.manager.model.*;
 import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
 import com.github.daberkow.cybiko.manager.model.ContentItem.NvramItem;
 import com.github.daberkow.cybiko.manager.ui.*;
+import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.control.*;
@@ -57,8 +60,12 @@ public class MainWindow extends StackPane {
     private List<Path> recentPaths = new ArrayList<>();
     private Menu recentMenu;
 
-    public MainWindow(Stage stage) {
+    // Theme
+    private final String initialTheme;
+
+    public MainWindow(Stage stage, String initialTheme) {
         this.stage = stage;
+        this.initialTheme = initialTheme;
 
         layout.setTop(createMenuBar());
         layout.setLeft(sidebar);
@@ -177,6 +184,23 @@ public class MainWindow extends StackPane {
 
         libraryMenu.getItems().addAll(addFolderItem, removeFolderItem, new SeparatorMenuItem(), refreshItem);
 
+        // --- View menu ---
+        Menu viewMenu = new Menu("View");
+
+        CheckMenuItem lightModeItem = new CheckMenuItem("Light Mode");
+        lightModeItem.setSelected("light".equals(initialTheme));
+        lightModeItem.setOnAction(e -> {
+            String theme = lightModeItem.isSelected() ? "light" : "dark";
+            if ("light".equals(theme)) {
+                Application.setUserAgentStylesheet(new PrimerLight().getUserAgentStylesheet());
+            } else {
+                Application.setUserAgentStylesheet(new PrimerDark().getUserAgentStylesheet());
+            }
+            try { LibraryConfig.saveTheme(theme); } catch (java.io.IOException ignored) {}
+        });
+
+        viewMenu.getItems().add(lightModeItem);
+
         // --- NVRAM menu ---
         Menu nvramMenu = new Menu("NVRAM");
 
@@ -211,7 +235,7 @@ public class MainWindow extends StackPane {
 
         helpMenu.getItems().add(aboutItem);
 
-        return new MenuBar(fileMenu, libraryMenu, nvramMenu, helpMenu);
+        return new MenuBar(fileMenu, libraryMenu, viewMenu, nvramMenu, helpMenu);
     }
 
     // ---- File operations ----

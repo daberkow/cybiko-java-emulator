@@ -1,5 +1,6 @@
 module com.github.daberkow.cybiko.manager {
     requires javafx.controls;
+    requires atlantafx.base;
 
     exports com.github.daberkow.cybiko.manager;
     exports com.github.daberkow.cybiko.manager.cfs;

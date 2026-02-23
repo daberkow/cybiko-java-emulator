@@ -26,7 +26,7 @@ jobs:
       - name: Read version
         id: version
         run: |
-          BASE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          BASE_VERSION=$(cat emulator/VERSION | tr -d '[:space:]')
           FULL_VERSION="${BASE_VERSION}.${GITHUB_RUN_NUMBER}"
           TAG="v${FULL_VERSION}"
           echo "version=${FULL_VERSION}" >> "$GITHUB_OUTPUT"
@@ -66,5 +66,7 @@ jobs:
             | `--app <file.app>` | Load app into NVRAM |
 
             Requires Java 21+.
-          files: build/distributions/*.zip
+          files: |
+            build/distributions/*.zip
+            manager/build/distributions/*.zip
           generate_release_notes: true
