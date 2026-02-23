@@ -1,44 +1,59 @@
-# Cybiko Emulator
+# Cybiko Emulator & NVRAM Manager
 
-A standalone Java emulator for the Cybiko handheld computer family, derived from MAME's emulation by Tim Schuerewegen. Supports the Cybiko Classic (V1), V2, and Xtreme with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code. 99% of this project was created with Claude Code Opus 4.6.
+A standalone Java emulator for the Cybiko handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by Tim Schuerewegen. Supports the Cybiko Classic (V1), V2, and Xtreme with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code. 99% of this project was created with Claude Code Opus 4.6.
 
-## Quick Start
+## Project Structure
+
+This is a multi-module Gradle project:
+
+```
+cybiko-java/
+├── emulator/          # H8S CPU emulator + CyOS boot (Swing UI)
+├── manager/           # NVRAM Manager desktop app (JavaFX)
+├── tools/             # Standalone utilities (H8S disassembler)
+├── build.gradle       # Root build config (Java 21 toolchain)
+└── settings.gradle    # Subproject includes
+```
+
+## Emulator
+
+### Quick Start
 
 ```bash
-./gradlew build
+./gradlew :emulator:build
 
 # Cybiko Xtreme (default)
-./gradlew run --args="cyrom150.bin cyos_v1508.bin"
+./gradlew :emulator:run --args="cyrom150.bin cyos_v1508.bin"
 
 # Cybiko Classic V1
-./gradlew run --args="--machine v1 cyrom112.bin flash_v1246.bin"
+./gradlew :emulator:run --args="--machine v1 cyrom112.bin flash_v1246.bin"
 ```
 
 You need two ROM files per machine:
 - **Xtreme**: `cyrom150.bin` + `cyos_v1508.bin` from MAME's `cybikoxt.zip`
 - **Classic V1**: `cyrom112.bin` + `flash_v1246.bin` from MAME's `cybiko.zip`
 
-## Loading Apps
+### Loading Apps
 
 Apps are loaded into a virtual NVRAM file that persists between sessions:
 
 ```bash
 # Add an app and boot
-./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app"
+./gradlew :emulator:run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app"
 
 # Next time, just boot - your apps and settings are saved
-./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram"
+./gradlew :emulator:run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram"
 
 # Add more apps later
-./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app dice.app --app Calendar.app"
+./gradlew :emulator:run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app dice.app --app Calendar.app"
 
 # See what's installed
-./gradlew run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --list-apps"
+./gradlew :emulator:run --args="cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --list-apps"
 ```
 
 Without `--nvram`, apps are loaded into a temporary image that is lost on exit.
 
-## Options
+### Options
 
 | Flag | Description |
 |------|-------------|
@@ -50,12 +65,60 @@ Without `--nvram`, apps are loaded into a temporary image that is lost on exit.
 | `--headless` | Run without GUI |
 | `--trace` | Instruction-level tracing (very slow) |
 
-## Keyboard
+### Keyboard
 
 The Cybiko keyboard is mapped to your PC keyboard. Letters map directly, navigation with arrow keys, Enter/Space/Tab/Esc as labeled.
 
 - **Xtreme**: Numbers use Fn+letter combos (Fn+Q=1, Fn+W=2, ... Fn+P=0) where Fn is mapped to the right Alt key.
 - **Classic V1**: Has dedicated number keys mapped directly to 0-9.
+
+## NVRAM Manager
+
+A JavaFX desktop application for managing Cybiko NVRAM/flash images without running the emulator. Browse, add, remove, and inspect files on any Cybiko flash image.
+
+### Quick Start
+
+```bash
+./gradlew :manager:build
+./gradlew :manager:run
+```
+
+### Features
+
+- **Open/save/create** NVRAM images (.nvram, .bin, .nv) for all hardware variants (Classic V1/V2, Xtreme)
+- **Library folders** -- configure directories of .app files, browse and add to NVRAM with one click
+- **Search/filter** -- real-time search across file listings
+- **Hex viewer** -- browse raw file data with multi-select and copy to clipboard
+- **Integrity validation** -- CyOS-level flash checks: checksums, boot blocks, block flags, file structure, data sizes
+- **Flash repair** -- automatically recover files from corrupted images
+- **NVRAM properties** -- flash geometry, block stats, checksum status
+- **CSV export** -- export file listings
+- **Dark theme** -- GitHub-style dark mode UI
+
+### Supported Flash Types
+
+| Type | Hardware | Page Size | Total Size |
+|------|----------|-----------|------------|
+| AT45DB041 | Classic V1/V2 (4Mbit) | 264 bytes | 540 KB |
+| AT45DB081 | 8Mbit variant | 264 bytes | 1.05 MB |
+| AT45DB161 | 16Mbit variant | 528 bytes | 2.11 MB |
+| SST 39VF400A | Xtreme | 258 bytes | 517 KB |
+
+## Building
+
+Requires Java 21 (auto-downloaded via Gradle toolchains).
+
+```bash
+# Build everything
+./gradlew build
+
+# Run all tests (~186 manager tests + emulator tests)
+./gradlew test
+
+# Build/test individual subprojects
+./gradlew :emulator:test
+./gradlew :manager:test
+```
 
 ## Links
 

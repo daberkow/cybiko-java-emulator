@@ -897,6 +897,142 @@ V1/V2 use 264-byte pages (vs XT's 258-byte):
 
 flash_v1358.bin: 2048 pages × 264 bytes = 540,672 bytes. "cyos.cfg" found at page 287.
 
+## NVRAM Manager (`manager/` subproject)
+
+Standalone JavaFX desktop application for managing Cybiko NVRAM/flash images without
+running the emulator. Separate Gradle subproject with its own `build.gradle` and
+`module-info.java`.
+
+### Build & Run
+```bash
+./gradlew :manager:build    # compile + run tests
+./gradlew :manager:test     # run tests only (~186 tests)
+./gradlew :manager:run      # launch the GUI
+```
+
+### Features
+- **Open/save/create** NVRAM images (.nvram, .bin, .nv) for all hardware variants
+- **Library folders** — configure directories of .app files, browse and add to NVRAM
+- **File management** — add files to NVRAM, remove files, view file details
+- **Search/filter** — real-time substring search across file lists
+- **Multi-select** — batch operations on multiple files
+- **Hex viewer** — virtualized ListView (handles 2MB+ images), multi-select + copy to clipboard
+- **Integrity validation** — CyOS-level checks: checksums, boot blocks, block flags,
+  file structure (orphans, duplicates, missing parts), data sizes
+- **Flash repair** — extracts recoverable files, reformats image, re-adds valid files
+- **NVRAM properties** — flash type, page/block counts, usage stats, checksum status
+- **CSV export** — export file listing as CSV
+- **Unsaved changes tracking** — title shows "*", confirms on close
+- **Dark theme** — GitHub-style dark mode CSS
+
+### Architecture
+
+#### Packages
+| Package | Description |
+|---------|-------------|
+| `cfs` | CFS filesystem core: geometry, checksums, pages, blocks, image, reader/writer, validator |
+| `model` | Data records: CfsFile, AppEntry, LibraryFolder, ContentItem (sealed interface) |
+| `io` | Library folder persistence (properties file) and directory scanner |
+| `ui` | JavaFX UI components: sidebar, content list, detail pane, dialogs |
+| (root) | App entry point, MainWindow controller |
+
+#### CFS Core Classes (`cfs` package)
+- `FlashGeometry` — Enum for AT45DB041 (V1/V2 4Mbit), AT45DB081 (8Mbit), AT45DB161 (16Mbit),
+  XTREME (SST 39VF400A). Defines page size, block data size, page count, boot blocks,
+  capacities, CRC algorithm per variant.
+- `CfsChecksum` — CRC16 (Xtreme) and CRC32 (AT45DB) checksum algorithms matching MAME.
+- `CfsPage` — Page-level I/O: read block data from page buffer, write page buffer with CRC,
+  verify page checksum. Handles different page header layouts per geometry.
+- `CfsBlock` — Parses/serializes 256-byte block data. Records: flags, dataSize, fileId,
+  partId, type marker, filename (part 0), timestamp (part 0), file data.
+- `CfsImage` — Central read/write API. Create fresh images, load from bytes, auto-detect
+  geometry from file size. Query: listFiles, readFile, findFileId. Mutate: addFile,
+  deleteFile. Capacity: freeBlockCount, freeSpace, usedSpace. Serialization: toBytes, verify.
+  Package-visible accessors for validator/repair.
+- `CfsReader` / `CfsWriter` — File-based convenience wrappers for CfsImage.
+- `CfsValidator` — Comprehensive validation matching CyOS flash checks:
+  - **Checksums**: verifies CRC on every page (CRC16 or CRC32 per geometry)
+  - **Boot blocks**: verifies boot pages contain all 0xFF data
+  - **Block flags**: checks unused blocks are properly marked (byte[0] & 0x80 == 0)
+  - **File structure**: detects orphaned continuation blocks (no part 0), duplicate
+    filenames, duplicate partIds, missing parts in sequences, wrong type markers
+    (0x20 for part 0, 0x00 for continuations), invalid filenames (non-printable chars)
+  - **Data sizes**: validates size field fits block capacity, warns on zero-size blocks
+  - Returns `Result` record with `List<Issue>`, `isValid()`, `errorCount()`, `warningCount()`
+  - `repair()` method: extracts all recoverable files, calls `reformatInPlace()`,
+    re-adds valid files. Returns `RepairResult` with preserved/removed/actions lists.
+
+#### Model Classes (`model` package)
+- `CfsFile` — Record: fileId, name, data bytes, timestamp, blockCount. Methods: size(),
+  extension(), formattedDate(), nowTimestamp().
+- `AppEntry` — Record: path, name, sizeBytes, lastModified. For library .app files.
+- `LibraryFolder` — Record: path, label, category. User-configured folder.
+- `ContentItem` — Sealed interface with `NvramItem(CfsFile)` and `LibraryItem(AppEntry, boolean inNvram)`.
+  Unifies NVRAM and library items for the table view.
+
+#### I/O Classes (`io` package)
+- `LibraryConfig` — Persists `List<LibraryFolder>` to `~/.cybiko-manager/library.properties`.
+- `LibraryScanner` — Scans directories for `.app` files (case-insensitive), returns `List<AppEntry>`.
+
+#### UI Classes (`ui` package)
+- `App` — JavaFX Application entry point. Sets dark theme, handles close-with-unsaved-changes.
+- `MainWindow` — Primary controller. Menu bar (File, Library, NVRAM, Help), wires all
+  components. Manages NVRAM images, library folders, view mode switching, CSV export,
+  validation, repair, unsaved changes.
+- `SidebarPane` — Left panel with NVRAM images list and Library folders list. Mutual
+  exclusion selection (selecting one clears the other). "+" button for adding library folders.
+  Context menu for removing folders. Custom names for NVRAM images.
+- `ContentListPane` — Center table view with search field. Columns: Name, Extension, Size,
+  Date, Status ("In NVRAM" badge). FilteredList chain for real-time search. Multi-select.
+- `DetailPane` — Right panel showing file details and action buttons (Add to NVRAM,
+  Remove from NVRAM, View Hex).
+- `CapacityBar` — Progress bar showing used/free space with percentage label.
+- `HexViewerDialog` — Non-modal Stage with virtualized ListView (16 bytes/row, offset + hex + ASCII).
+  Multi-select with Copy button and Ctrl+C shortcut.
+- `NvramPropertiesDialog` — Modal dialog: flash geometry, block stats, checksum status.
+- `LibraryFolderDialog` — Modal dialog: DirectoryChooser + label/category fields.
+- `AboutDialog` — Version, Java/JavaFX/OS info.
+
+### CFS Validation Checks
+The validator performs the same checks CyOS does during flash integrity verification:
+
+| Category | Severity | What it checks |
+|----------|----------|----------------|
+| Checksum | ERROR | CRC mismatch on any page (CRC16 for Xtreme, CRC32 for AT45DB) |
+| Boot block | WARNING | Non-0xFF data in boot pages 0-4 |
+| Block flags | WARNING | Used block with flag byte inconsistency |
+| File structure | ERROR | Orphaned continuation blocks (no matching part 0) |
+| File structure | ERROR | Duplicate filenames across different fileIds |
+| File structure | WARNING | Duplicate partIds within same fileId |
+| File structure | WARNING | Missing parts in sequence (e.g., has part 0 and 2 but not 1) |
+| File structure | WARNING | Wrong type marker (should be 0x20 for part 0, 0x00 for cont.) |
+| File structure | WARNING | Invalid filename (non-printable characters) |
+| Data size | ERROR | Size field exceeds block capacity |
+| Data size | WARNING | Zero-size used block |
+
+### Flash Repair Strategy
+1. Scan all blocks, collect files that have valid part 0 with complete part sequences
+2. Extract file data (name, bytes, timestamp) for each recoverable file
+3. Call `CfsImage.reformatInPlace()` — wipes image and writes fresh boot blocks + empty file blocks
+4. Re-add each recovered file via `CfsImage.addFile(name, data, timestamp)`
+5. Report what was preserved and what was removed (orphans, incomplete files, duplicates)
+
+### Test Coverage (~186 tests)
+| Test File | Coverage |
+|-----------|----------|
+| `CfsChecksumTest` | CRC16/CRC32 algorithms, known vectors |
+| `CfsPageTest` | Page read/write, CRC verification, all geometries |
+| `CfsBlockTest` | Block parse/serialize, first/continuation parts |
+| `CfsImageTest` | Add/delete files, capacity, multi-block files, roundtrip, clearModified |
+| `CfsReaderWriterTest` | File I/O roundtrip |
+| `CfsValidatorTest` | All 5 check categories, fresh/corrupted images, repair (checksum fix, boot block fix, orphan removal, multi-block preserve, clean no-op, modified flag) |
+| `FlashGeometryTest` | Geometry detection, capacities |
+| `CfsFileTest` | Record fields, timestamp conversion |
+| `AppEntryTest` | Extension parsing, date conversion |
+| `ContentItemTest` | Sealed interface delegation, inNvram flag |
+| `LibraryConfigTest` | Save/load roundtrip, empty/missing config |
+| `LibraryScannerTest` | Directory scanning, filtering, empty dirs |
+
 ## Development Workflow
 1. Run emulator, find unimplemented opcode
 2. Look up instruction in MAME h8.lst (mask/match pattern + microcode)

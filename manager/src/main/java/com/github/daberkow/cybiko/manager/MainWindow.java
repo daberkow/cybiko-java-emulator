@@ -1,0 +1,715 @@
+package com.github.daberkow.cybiko.manager;
+
+import com.github.daberkow.cybiko.manager.cfs.*;
+import com.github.daberkow.cybiko.manager.io.LibraryConfig;
+import com.github.daberkow.cybiko.manager.io.LibraryScanner;
+import com.github.daberkow.cybiko.manager.model.*;
+import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
+import com.github.daberkow.cybiko.manager.model.ContentItem.NvramItem;
+import com.github.daberkow.cybiko.manager.ui.*;
+import javafx.scene.control.*;
+import javafx.scene.layout.BorderPane;
+import javafx.stage.FileChooser;
+import javafx.stage.Stage;
+
+import java.io.File;
+import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+/**
+ * Main application window layout.
+ */
+public class MainWindow extends BorderPane {
+
+    private static final DateTimeFormatter CSV_DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    private final Stage stage;
+    private final SidebarPane sidebar = new SidebarPane();
+    private final ContentListPane contentList = new ContentListPane();
+    private final DetailPane detail = new DetailPane();
+    private final CapacityBar capacityBar = new CapacityBar();
+
+    private CfsImage currentImage;
+    private Path currentPath;
+
+    private enum ViewMode { NVRAM, LIBRARY }
+    private ViewMode currentViewMode = ViewMode.NVRAM;
+
+    // Library state
+    private List<LibraryFolder> libraryFolders = new ArrayList<>();
+    private final Map<LibraryFolder, List<AppEntry>> libraryCache = new HashMap<>();
+    private LibraryFolder currentLibraryFolder;
+
+    public MainWindow(Stage stage) {
+        this.stage = stage;
+
+        setTop(createMenuBar());
+        setLeft(sidebar);
+        setCenter(contentList);
+        setRight(detail);
+        setBottom(capacityBar);
+
+        // Wire NVRAM selection
+        sidebar.setOnSelectionChanged(entry -> {
+            currentImage = entry.image();
+            currentPath = entry.path();
+            currentViewMode = ViewMode.NVRAM;
+            currentLibraryFolder = null;
+            refreshFileList();
+            detail.setNvramAvailable(true);
+            updateTitle();
+        });
+
+        // Wire library selection
+        sidebar.setOnLibrarySelected(folder -> {
+            currentLibraryFolder = folder;
+            currentViewMode = ViewMode.LIBRARY;
+            refreshLibraryView();
+        });
+
+        sidebar.setOnAddLibraryFolder(this::addLibraryFolder);
+        sidebar.setOnRemoveLibraryFolder(this::removeLibraryFolder);
+
+        // Wire content list selection
+        contentList.setOnItemSelected(item -> detail.showItem(item));
+
+        // Wire detail pane actions
+        detail.setOnAddToNvram(this::addLibraryItemToNvram);
+        detail.setOnRemoveFromNvram(this::removeNvramItem);
+        detail.setOnViewHex(this::viewHex);
+
+        // Load library config
+        libraryFolders = LibraryConfig.load();
+        sidebar.setLibraryFolders(libraryFolders);
+    }
+
+    private MenuBar createMenuBar() {
+        // --- File menu ---
+        Menu fileMenu = new Menu("File");
+
+        MenuItem openItem = new MenuItem("Open...");
+        openItem.setOnAction(e -> openFile());
+
+        MenuItem newXtItem = new MenuItem("New Xtreme Image");
+        newXtItem.setOnAction(e -> newImage(FlashGeometry.XTREME));
+
+        MenuItem newV1Item = new MenuItem("New Classic V1 Image (AT45DB041)");
+        newV1Item.setOnAction(e -> newImage(FlashGeometry.AT45DB041));
+
+        MenuItem newV2Item = new MenuItem("New Classic V2 Image (AT45DB081)");
+        newV2Item.setOnAction(e -> newImage(FlashGeometry.AT45DB081));
+
+        MenuItem saveItem = new MenuItem("Save");
+        saveItem.setOnAction(e -> saveFile());
+
+        MenuItem saveAsItem = new MenuItem("Save As...");
+        saveAsItem.setOnAction(e -> saveFileAs());
+
+        MenuItem exitItem = new MenuItem("Exit");
+        exitItem.setOnAction(e -> stage.close());
+
+        fileMenu.getItems().addAll(
+            openItem,
+            new SeparatorMenuItem(),
+            newXtItem, newV1Item, newV2Item,
+            new SeparatorMenuItem(),
+            saveItem, saveAsItem,
+            new SeparatorMenuItem(),
+            exitItem
+        );
+
+        // --- Library menu ---
+        Menu libraryMenu = new Menu("Library");
+
+        MenuItem addFolderItem = new MenuItem("Add Folder...");
+        addFolderItem.setOnAction(e -> addLibraryFolder());
+
+        MenuItem removeFolderItem = new MenuItem("Remove Folder");
+        removeFolderItem.setOnAction(e -> {
+            LibraryFolder selected = sidebar.getSelectedLibraryFolder();
+            if (selected != null) removeLibraryFolder(selected);
+        });
+
+        MenuItem refreshItem = new MenuItem("Refresh");
+        refreshItem.setOnAction(e -> refreshLibrary());
+
+        libraryMenu.getItems().addAll(addFolderItem, removeFolderItem, new SeparatorMenuItem(), refreshItem);
+
+        // --- NVRAM menu ---
+        Menu nvramMenu = new Menu("NVRAM");
+
+        MenuItem addFileItem = new MenuItem("Add File...");
+        addFileItem.setOnAction(e -> addFileToNvram());
+
+        MenuItem removeSelectedItem = new MenuItem("Remove Selected");
+        removeSelectedItem.setOnAction(e -> removeSelectedFromNvram());
+
+        MenuItem validateItem = new MenuItem("Validate Integrity");
+        validateItem.setOnAction(e -> validateIntegrity());
+
+        MenuItem propertiesItem = new MenuItem("Properties...");
+        propertiesItem.setOnAction(e -> showProperties());
+
+        MenuItem exportCsvItem = new MenuItem("Export as CSV...");
+        exportCsvItem.setOnAction(e -> exportCsv());
+
+        nvramMenu.getItems().addAll(
+            addFileItem, removeSelectedItem,
+            new SeparatorMenuItem(),
+            validateItem, propertiesItem,
+            new SeparatorMenuItem(),
+            exportCsvItem
+        );
+
+        // --- Help menu ---
+        Menu helpMenu = new Menu("Help");
+
+        MenuItem aboutItem = new MenuItem("About");
+        aboutItem.setOnAction(e -> new AboutDialog().showAndWait());
+
+        helpMenu.getItems().add(aboutItem);
+
+        return new MenuBar(fileMenu, libraryMenu, nvramMenu, helpMenu);
+    }
+
+    // ---- File operations ----
+
+    private void openFile() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Open CFS / NVRAM Image");
+        chooser.getExtensionFilters().addAll(
+            new FileChooser.ExtensionFilter("All Supported", "*.bin", "*.nv", "*.nvram", "*"),
+            new FileChooser.ExtensionFilter("NVRAM Images", "*.nvram"),
+            new FileChooser.ExtensionFilter("Binary Files", "*.bin"),
+            new FileChooser.ExtensionFilter("All Files", "*.*")
+        );
+        File file = chooser.showOpenDialog(stage);
+        if (file == null) return;
+
+        try {
+            Path path = file.toPath();
+            CfsImage image = CfsReader.read(path);
+            sidebar.addImage(path, image);
+            currentImage = image;
+            currentPath = path;
+            currentViewMode = ViewMode.NVRAM;
+            detail.setNvramAvailable(true);
+            refreshFileList();
+            updateTitle();
+        } catch (Exception ex) {
+            showError("Failed to open image", ex.getMessage());
+        }
+    }
+
+    private void newImage(FlashGeometry geom) {
+        TextInputDialog nameDialog = new TextInputDialog("Untitled.nvram");
+        nameDialog.setTitle("New NVRAM Image");
+        nameDialog.setHeaderText("Create new " + geom.name() + " image");
+        nameDialog.setContentText("Image name:");
+        Optional<String> nameResult = nameDialog.showAndWait();
+        if (nameResult.isEmpty()) return;
+
+        String name = nameResult.get().strip();
+        if (name.isEmpty()) name = "Untitled.nvram";
+
+        CfsImage image = new CfsImage(geom);
+        sidebar.addImage(null, image, name);
+        currentImage = image;
+        currentPath = null;
+        currentViewMode = ViewMode.NVRAM;
+        detail.setNvramAvailable(true);
+        refreshFileList();
+        updateTitle();
+    }
+
+    private void saveFile() {
+        if (currentImage == null) return;
+        if (currentPath == null) {
+            saveFileAs();
+            return;
+        }
+        try {
+            CfsWriter.write(currentImage, currentPath);
+            currentImage.clearModified();
+            updateTitle();
+        } catch (Exception ex) {
+            showError("Failed to save image", ex.getMessage());
+        }
+    }
+
+    private void saveFileAs() {
+        if (currentImage == null) return;
+
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Save CFS Image As");
+        chooser.getExtensionFilters().addAll(
+            new FileChooser.ExtensionFilter("NVRAM Image", "*.nvram"),
+            new FileChooser.ExtensionFilter("Binary", "*.bin"),
+            new FileChooser.ExtensionFilter("All Files", "*.*")
+        );
+        File file = chooser.showSaveDialog(stage);
+        if (file == null) return;
+
+        // Auto-append selected extension if the filename has none
+        String name = file.getName();
+        if (!name.contains(".")) {
+            FileChooser.ExtensionFilter selected = chooser.getSelectedExtensionFilter();
+            if (selected != null && !selected.getExtensions().isEmpty()) {
+                String ext = selected.getExtensions().get(0); // e.g. "*.nvram"
+                if (ext.startsWith("*.") && !ext.equals("*.*")) {
+                    file = new File(file.getParent(), name + ext.substring(1));
+                }
+            }
+        }
+
+        try {
+            currentPath = file.toPath();
+            CfsWriter.write(currentImage, currentPath);
+            currentImage.clearModified();
+            sidebar.updateSelected(currentPath);
+            updateTitle();
+        } catch (Exception ex) {
+            showError("Failed to save image", ex.getMessage());
+        }
+    }
+
+    // ---- Library operations ----
+
+    private void addLibraryFolder() {
+        LibraryFolderDialog dialog = new LibraryFolderDialog(stage);
+        dialog.showAndWait().ifPresent(folder -> {
+            libraryFolders.add(folder);
+            sidebar.setLibraryFolders(libraryFolders);
+            saveLibraryConfig();
+        });
+    }
+
+    private void removeLibraryFolder(LibraryFolder folder) {
+        libraryFolders.remove(folder);
+        libraryCache.remove(folder);
+        sidebar.setLibraryFolders(libraryFolders);
+        if (folder.equals(currentLibraryFolder)) {
+            currentLibraryFolder = null;
+            contentList.clear();
+            detail.showItem(null);
+        }
+        saveLibraryConfig();
+    }
+
+    private void refreshLibrary() {
+        libraryCache.clear();
+        if (currentLibraryFolder != null) {
+            refreshLibraryView();
+        }
+    }
+
+    private void refreshLibraryView() {
+        if (currentLibraryFolder == null) return;
+
+        List<AppEntry> entries = libraryCache.computeIfAbsent(
+            currentLibraryFolder, LibraryScanner::scan
+        );
+
+        Set<String> nvramNames = getNvramFileNames();
+        contentList.setLibraryFiles(entries, currentLibraryFolder.label(), nvramNames);
+        capacityBar.update(currentImage);
+        detail.showItem(null);
+        detail.setNvramAvailable(currentImage != null);
+    }
+
+    private void saveLibraryConfig() {
+        try {
+            LibraryConfig.save(libraryFolders);
+        } catch (Exception ex) {
+            showError("Failed to save library config", ex.getMessage());
+        }
+    }
+
+    // ---- NVRAM operations ----
+
+    private void addFileToNvram() {
+        if (currentImage == null) {
+            showError("No NVRAM Image", "Open or create an NVRAM image first.");
+            return;
+        }
+
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Add File to NVRAM");
+        chooser.getExtensionFilters().addAll(
+            new FileChooser.ExtensionFilter("App Files", "*.app"),
+            new FileChooser.ExtensionFilter("All Files", "*.*")
+        );
+        File file = chooser.showOpenDialog(stage);
+        if (file == null) return;
+
+        try {
+            byte[] data = Files.readAllBytes(file.toPath());
+            String name = file.getName();
+            if (!currentImage.addFile(name, data)) {
+                showError("Add Failed", "Not enough space or filename too long.");
+                return;
+            }
+            afterNvramModification();
+        } catch (Exception ex) {
+            showError("Failed to add file", ex.getMessage());
+        }
+    }
+
+    private void removeSelectedFromNvram() {
+        if (currentImage == null) return;
+
+        List<ContentItem> selected = contentList.getSelectedItems();
+        if (selected.isEmpty()) return;
+
+        int count = 0;
+        for (ContentItem item : selected) {
+            if (item instanceof NvramItem ni) {
+                currentImage.deleteFile(ni.file().name());
+                count++;
+            }
+        }
+        if (count > 0) {
+            afterNvramModification();
+        }
+    }
+
+    private void addLibraryItemToNvram(LibraryItem item) {
+        if (currentImage == null) return;
+
+        try {
+            byte[] data = Files.readAllBytes(item.entry().path());
+            if (!currentImage.addFile(item.entry().name(), data)) {
+                showError("Add Failed", "Not enough space or filename too long.");
+                return;
+            }
+            afterNvramModification();
+            // Refresh library view to update "In NVRAM" status
+            if (currentViewMode == ViewMode.LIBRARY) {
+                refreshLibraryView();
+            }
+        } catch (Exception ex) {
+            showError("Failed to add file", ex.getMessage());
+        }
+    }
+
+    private void removeNvramItem(NvramItem item) {
+        if (currentImage == null) return;
+
+        currentImage.deleteFile(item.file().name());
+        afterNvramModification();
+    }
+
+    private void afterNvramModification() {
+        if (currentViewMode == ViewMode.NVRAM) {
+            refreshFileList();
+        }
+        sidebar.refreshSelectedEntry();
+        capacityBar.update(currentImage);
+        detail.showItem(null);
+        updateTitle();
+    }
+
+    private void validateIntegrity() {
+        if (currentImage == null) {
+            showError("No NVRAM Image", "Open an NVRAM image first.");
+            return;
+        }
+
+        CfsValidator.Result result = CfsValidator.validate(currentImage);
+
+        if (result.isValid() && result.warningCount() == 0) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Integrity Check");
+            alert.setHeaderText("Image Valid");
+            alert.setContentText("All checks passed — checksums valid, block structure consistent, "
+                + "no orphaned blocks. CyOS will accept this image without flash repair.");
+            alert.showAndWait();
+            return;
+        }
+
+        // Build detailed report
+        String report = buildValidationReport(result);
+
+        Alert alert = new Alert(result.errorCount() > 0
+            ? Alert.AlertType.ERROR : Alert.AlertType.WARNING);
+        alert.setTitle("Integrity Check");
+        alert.setHeaderText(result.errorCount() > 0
+            ? "Errors Found — CyOS will trigger flash repair"
+            : "Warnings Found");
+        alert.setResizable(true);
+
+        TextArea textArea = new TextArea(report);
+        textArea.setEditable(false);
+        textArea.setWrapText(true);
+        textArea.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;");
+        textArea.setPrefRowCount(20);
+        textArea.setPrefColumnCount(60);
+
+        alert.getDialogPane().setContent(textArea);
+
+        if (result.errorCount() > 0) {
+            ButtonType repairBtn = new ButtonType("Repair");
+            ButtonType closeBtn = new ButtonType("Close", ButtonBar.ButtonData.CANCEL_CLOSE);
+            alert.getButtonTypes().setAll(repairBtn, closeBtn);
+
+            Optional<ButtonType> choice = alert.showAndWait();
+            if (choice.isPresent() && choice.get() == repairBtn) {
+                performRepair();
+            }
+        } else {
+            alert.showAndWait();
+        }
+    }
+
+    private void performRepair() {
+        CfsValidator.RepairResult repairResult = CfsValidator.repair(currentImage);
+
+        // Refresh UI
+        afterNvramModification();
+
+        // Re-validate to confirm
+        CfsValidator.Result postCheck = CfsValidator.validate(currentImage);
+
+        // Build repair report
+        StringBuilder report = new StringBuilder();
+        report.append("=== REPAIR COMPLETE ===\n\n");
+
+        report.append("FILES PRESERVED (").append(repairResult.preserved().size()).append("):\n");
+        if (repairResult.preserved().isEmpty()) {
+            report.append("  (none)\n");
+        } else {
+            for (String f : repairResult.preserved()) {
+                report.append("  ").append(f).append('\n');
+            }
+        }
+        report.append('\n');
+
+        if (!repairResult.removed().isEmpty()) {
+            report.append("FILES REMOVED (").append(repairResult.removed().size()).append("):\n");
+            for (String f : repairResult.removed()) {
+                report.append("  ").append(f).append('\n');
+            }
+            report.append('\n');
+        }
+
+        report.append("ACTIONS TAKEN:\n");
+        for (String a : repairResult.actions()) {
+            report.append("  ").append(a).append('\n');
+        }
+        report.append('\n');
+
+        report.append("POST-REPAIR VALIDATION: ");
+        if (postCheck.isValid() && postCheck.warningCount() == 0) {
+            report.append("PASSED — image is clean\n");
+        } else {
+            report.append(postCheck.errorCount()).append(" error(s), ")
+                .append(postCheck.warningCount()).append(" warning(s) remaining\n");
+        }
+
+        report.append("\nNote: Changes are in memory. Use File > Save to write to disk.");
+
+        Alert resultAlert = new Alert(Alert.AlertType.INFORMATION);
+        resultAlert.setTitle("Repair Complete");
+        resultAlert.setHeaderText("Flash image repaired");
+        resultAlert.setResizable(true);
+
+        TextArea textArea = new TextArea(report.toString());
+        textArea.setEditable(false);
+        textArea.setWrapText(true);
+        textArea.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;");
+        textArea.setPrefRowCount(20);
+        textArea.setPrefColumnCount(60);
+
+        resultAlert.getDialogPane().setContent(textArea);
+        resultAlert.showAndWait();
+    }
+
+    private String buildValidationReport(CfsValidator.Result result) {
+        StringBuilder report = new StringBuilder();
+        report.append(String.format("%d error(s), %d warning(s)\n\n",
+            result.errorCount(), result.warningCount()));
+
+        if (result.errorCount() > 0) {
+            report.append("ERRORS (will trigger CyOS flash repair):\n");
+            for (CfsValidator.Issue issue : result.issues()) {
+                if (issue.severity() == CfsValidator.Severity.ERROR) {
+                    report.append("  ").append(issue).append('\n');
+                }
+            }
+            report.append('\n');
+        }
+
+        if (result.warningCount() > 0) {
+            report.append("WARNINGS (suspicious but may not cause issues):\n");
+            for (CfsValidator.Issue issue : result.issues()) {
+                if (issue.severity() == CfsValidator.Severity.WARNING) {
+                    report.append("  ").append(issue).append('\n');
+                }
+            }
+        }
+
+        return report.toString();
+    }
+
+    private void showProperties() {
+        if (currentImage == null) {
+            showError("No NVRAM Image", "Open an NVRAM image first.");
+            return;
+        }
+        new NvramPropertiesDialog(currentImage, currentPath).showAndWait();
+    }
+
+    private void exportCsv() {
+        if (currentImage == null) {
+            showError("No NVRAM Image", "Open an NVRAM image first.");
+            return;
+        }
+
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Export as CSV");
+        chooser.getExtensionFilters().add(
+            new FileChooser.ExtensionFilter("CSV Files", "*.csv")
+        );
+        File file = chooser.showSaveDialog(stage);
+        if (file == null) return;
+
+        try (PrintWriter pw = new PrintWriter(file)) {
+            pw.println("Name,Extension,Size (bytes),Modified,Blocks,File ID");
+            for (CfsFile f : currentImage.listFiles()) {
+                String date;
+                try {
+                    date = f.lastModified().format(CSV_DATE_FMT);
+                } catch (Exception e) {
+                    date = "";
+                }
+                pw.printf("\"%s\",\"%s\",%d,\"%s\",%d,%d%n",
+                    f.name().replace("\"", "\"\""),
+                    f.extension(),
+                    f.size(),
+                    date,
+                    f.blockCount(),
+                    f.fileId()
+                );
+            }
+        } catch (Exception ex) {
+            showError("Failed to export CSV", ex.getMessage());
+        }
+    }
+
+    // ---- Hex viewer ----
+
+    private void viewHex(ContentItem item) {
+        byte[] data;
+        String title;
+        if (item instanceof NvramItem ni) {
+            data = ni.file().data();
+            title = ni.file().name();
+        } else if (item instanceof LibraryItem li) {
+            try {
+                data = Files.readAllBytes(li.entry().path());
+                title = li.entry().name();
+            } catch (Exception ex) {
+                showError("Failed to read file", ex.getMessage());
+                return;
+            }
+        } else {
+            return;
+        }
+
+        HexViewerDialog hexViewer = new HexViewerDialog(title, data);
+        hexViewer.show();
+    }
+
+    // ---- View refresh ----
+
+    private void refreshFileList() {
+        if (currentImage == null) {
+            contentList.clear();
+            capacityBar.update(null);
+            detail.showItem(null);
+            return;
+        }
+
+        List<CfsFile> files = currentImage.listFiles();
+        String name = currentPath != null ? currentPath.getFileName().toString() : "Untitled";
+        contentList.setNvramFiles(files, name);
+        capacityBar.update(currentImage);
+        detail.showItem(null);
+    }
+
+    private Set<String> getNvramFileNames() {
+        if (currentImage == null) return Set.of();
+        Set<String> names = new HashSet<>();
+        for (CfsFile f : currentImage.listFiles()) {
+            names.add(f.name());
+        }
+        return names;
+    }
+
+    // ---- Title and unsaved changes ----
+
+    private void updateTitle() {
+        StringBuilder title = new StringBuilder("Cybiko NVRAM Manager");
+        if (currentPath != null) {
+            title.append(" - ").append(currentPath.getFileName());
+        } else if (currentImage != null) {
+            SidebarPane.ImageEntry entry = sidebar.getSelectedEntry();
+            String name = (entry != null) ? entry.displayName() : "Untitled";
+            title.append(" - ").append(name);
+        }
+        if (currentImage != null && currentImage.isModified()) {
+            title.append(" *");
+        }
+        stage.setTitle(title.toString());
+    }
+
+    /**
+     * Check for unsaved changes and prompt user. Returns true if safe to close,
+     * false if user cancelled.
+     */
+    public boolean confirmClose() {
+        for (SidebarPane.ImageEntry entry : sidebar.getNvramEntries()) {
+            if (entry.image().isModified()) {
+                String name = entry.path() != null ? entry.path().getFileName().toString() : "Untitled";
+                Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+                alert.setTitle("Unsaved Changes");
+                alert.setHeaderText("Save changes to " + name + "?");
+                alert.setContentText("Your changes will be lost if you don't save them.");
+
+                ButtonType saveBtn = new ButtonType("Save");
+                ButtonType dontSaveBtn = new ButtonType("Don't Save");
+                ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+                alert.getButtonTypes().setAll(saveBtn, dontSaveBtn, cancelBtn);
+
+                Optional<ButtonType> result = alert.showAndWait();
+                if (result.isEmpty() || result.get() == cancelBtn) {
+                    return false; // User cancelled
+                }
+                if (result.get() == saveBtn) {
+                    // Switch context to this image for saving
+                    currentImage = entry.image();
+                    currentPath = entry.path();
+                    sidebar.selectNvramEntry(entry.image());
+                    saveFile();
+                    // If still modified (save failed or was cancelled), abort close
+                    if (entry.image().isModified()) {
+                        return false;
+                    }
+                }
+                // Don't Save: continue to next
+            }
+        }
+        return true;
+    }
+
+    private void showError(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
+        alert.showAndWait();
+    }
+}

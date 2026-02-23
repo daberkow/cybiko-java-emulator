@@ -6,3 +6,4 @@ plugins {
 rootProject.name = 'cybiko-java'
 
 include 'emulator'
+include 'manager'
