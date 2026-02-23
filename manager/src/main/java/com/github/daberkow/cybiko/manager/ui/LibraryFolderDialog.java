@@ -17,14 +17,15 @@ import java.nio.file.Path;
  */
 public class LibraryFolderDialog extends Dialog<LibraryFolder> {
 
+    private final Window owner;
     private Path selectedPath;
     private final Label pathLabel = new Label("No folder selected");
     private final TextField labelField = new TextField();
     private final TextField categoryField = new TextField();
 
     public LibraryFolderDialog(Window owner) {
+        this.owner = owner;
         setTitle("Add Library Folder");
-        initOwner(owner);
 
         DialogPane dialogPane = getDialogPane();
         dialogPane.getStyleClass().add("dialog-pane");
@@ -38,7 +39,7 @@ public class LibraryFolderDialog extends Dialog<LibraryFolder> {
         browseBtn.setOnAction(e -> {
             DirectoryChooser chooser = new DirectoryChooser();
             chooser.setTitle("Select Library Folder");
-            File dir = chooser.showDialog(getOwner());
+            File dir = chooser.showDialog(owner);
             if (dir != null) {
                 selectedPath = dir.toPath();
                 pathLabel.setText(selectedPath.toString());

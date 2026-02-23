@@ -87,13 +87,15 @@ A JavaFX desktop application for managing Cybiko NVRAM/flash images without runn
 
 - **Open/save/create** NVRAM images (.nvram, .bin, .nv) for all hardware variants (Classic V1/V2, Xtreme)
 - **Library folders** -- configure directories of .app files, browse and add to NVRAM with one click
+- **Drag-and-drop** -- drag library items onto NVRAM entries in the sidebar to add files directly (multi-select supported)
+- **Smart lists** -- "Recently Added" and "Not in Any NVRAM" virtual folders that update automatically
 - **Search/filter** -- real-time search across file listings
 - **Hex viewer** -- browse raw file data with multi-select and copy to clipboard
 - **Integrity validation** -- CyOS-level flash checks: checksums, boot blocks, block flags, file structure, data sizes
 - **Flash repair** -- automatically recover files from corrupted images
 - **NVRAM properties** -- flash geometry, block stats, checksum status
 - **CSV export** -- export file listings
-- **Dark theme** -- GitHub-style dark mode UI
+- **Dark theme** -- GitHub-style dark mode UI, Wayland-compatible in-window dialogs
 
 ### Supported Flash Types
 

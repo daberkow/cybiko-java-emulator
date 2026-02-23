@@ -360,7 +360,44 @@
     -fx-text-fill: #e6edf3;
 }
 
-/* ===== DIALOGS ===== */
+/* ===== DRAG-AND-DROP ===== */
+.drop-target {
+    -fx-border-color: #3fb950;
+    -fx-border-style: dashed;
+    -fx-border-width: 2;
+    -fx-background-color: #1a3a2a;
+}
+
+/* ===== IN-WINDOW DIALOG OVERLAY ===== */
+.dialog-overlay {
+    -fx-background-color: rgba(0, 0, 0, 0.4);
+}
+.dialog-overlay .dialog-pane {
+    -fx-background-color: #2d2d2d;
+    -fx-background-radius: 8;
+    -fx-border-color: #3c3c3c;
+    -fx-border-radius: 8;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.6), 24, 0, 0, 8);
+    -fx-min-width: 300;
+    -fx-max-width: 600;
+}
+.dialog-overlay .dialog-pane .header-panel {
+    -fx-background-color: #252526;
+    -fx-background-radius: 8 8 0 0;
+}
+.dialog-overlay .dialog-pane .button-bar .container {
+    -fx-background-color: #2d2d2d;
+}
+.dialog-overlay .dialog-pane .button {
+    -fx-text-fill: #cccccc;
+    -fx-background-color: #3c3c3c;
+    -fx-background-radius: 4;
+}
+.dialog-overlay .dialog-pane .button:hover {
+    -fx-background-color: #555555;
+}
+
+/* ===== DIALOGS (standalone fallback) ===== */
 .dialog-pane {
     -fx-background-color: #2d2d2d;
 }

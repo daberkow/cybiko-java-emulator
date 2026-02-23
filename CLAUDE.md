@@ -922,6 +922,10 @@ running the emulator. Separate Gradle subproject with its own `build.gradle` and
 - **File management** — add files to NVRAM, remove files, view file details
 - **Search/filter** — real-time substring search across file lists
 - **Multi-select** — batch operations on multiple files
+- **Drag-and-drop** — drag library items onto NVRAM entries in sidebar to add files
+  directly (multi-select supported, visual drop target feedback)
+- **Smart lists** — "Recently Added" (top 20 by date) and "Not in Any NVRAM" virtual
+  folders that auto-refresh when NVRAMs or library folders change
 - **Hex viewer** — virtualized ListView (handles 2MB+ images), multi-select + copy to clipboard
 - **Integrity validation** — CyOS-level checks: checksums, boot blocks, block flags,
   file structure (orphans, duplicates, missing parts), data sizes
@@ -929,6 +933,8 @@ running the emulator. Separate Gradle subproject with its own `build.gradle` and
 - **NVRAM properties** — flash type, page/block counts, usage stats, checksum status
 - **CSV export** — export file listing as CSV
 - **Unsaved changes tracking** — title shows "*", confirms on close
+- **In-window dialogs** — all modal dialogs render as overlays inside the main window
+  using `Platform.enterNestedEventLoop()`, avoiding Wayland compositor tiling issues
 - **Dark theme** — GitHub-style dark mode CSS
 
 ### Architecture
@@ -982,21 +988,26 @@ running the emulator. Separate Gradle subproject with its own `build.gradle` and
 
 #### UI Classes (`ui` package)
 - `App` — JavaFX Application entry point. Sets dark theme, handles close-with-unsaved-changes.
-- `MainWindow` — Primary controller. Menu bar (File, Library, NVRAM, Help), wires all
-  components. Manages NVRAM images, library folders, view mode switching, CSV export,
-  validation, repair, unsaved changes.
-- `SidebarPane` — Left panel with NVRAM images list and Library folders list. Mutual
-  exclusion selection (selecting one clears the other). "+" button for adding library folders.
-  Context menu for removing folders. Custom names for NVRAM images.
+- `MainWindow` — Primary controller (extends StackPane for overlay dialogs). Menu bar
+  (File, Library, NVRAM, Help), wires all components. Manages NVRAM images, library
+  folders, view mode switching (NVRAM/LIBRARY/SMART_LIST), drag-and-drop wiring,
+  CSV export, validation, repair, unsaved changes. All dialogs rendered as in-window
+  overlays via `showDialog()` using `Platform.enterNestedEventLoop()` to avoid
+  Wayland compositor tiling issues with secondary OS windows.
+- `SidebarPane` — Left panel with three sections: NVRAM images list, Smart Lists
+  (Recently Added / Not in Any NVRAM), and Library folders list. Three-way mutual
+  exclusion selection. Drop target on NVRAM cells for drag-and-drop from library.
+  "+" button for adding library folders. Context menu for removing folders.
 - `ContentListPane` — Center table view with search field. Columns: Name, Extension, Size,
   Date, Status ("In NVRAM" badge). FilteredList chain for real-time search. Multi-select.
+  Drag source for LibraryItems (static field pattern for same-JVM transfer).
 - `DetailPane` — Right panel showing file details and action buttons (Add to NVRAM,
   Remove from NVRAM, View Hex).
 - `CapacityBar` — Progress bar showing used/free space with percentage label.
 - `HexViewerDialog` — Non-modal Stage with virtualized ListView (16 bytes/row, offset + hex + ASCII).
   Multi-select with Copy button and Ctrl+C shortcut.
-- `NvramPropertiesDialog` — Modal dialog: flash geometry, block stats, checksum status.
-- `LibraryFolderDialog` — Modal dialog: DirectoryChooser + label/category fields.
+- `NvramPropertiesDialog` — In-window overlay dialog: flash geometry, block stats, checksum status.
+- `LibraryFolderDialog` — In-window overlay dialog: DirectoryChooser + label/category fields.
 - `AboutDialog` — Version, Java/JavaFX/OS info.
 
 ### CFS Validation Checks

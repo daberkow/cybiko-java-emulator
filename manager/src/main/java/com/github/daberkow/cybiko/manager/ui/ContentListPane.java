@@ -13,7 +13,10 @@ import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
+import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.DataFormat;
 import javafx.scene.input.KeyCode;
+import javafx.scene.input.TransferMode;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -27,6 +30,12 @@ import java.util.function.Consumer;
  * Center pane with file list table, search field, and multi-select support.
  */
 public class ContentListPane extends VBox {
+
+    static final DataFormat LIBRARY_ITEMS = new DataFormat("application/x-cybiko-library-items");
+    private static List<LibraryItem> draggedItems;
+
+    /** Get the items currently being dragged (same-JVM transfer). */
+    public static List<LibraryItem> getDraggedItems() { return draggedItems; }
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
@@ -139,6 +148,26 @@ public class ContentListPane extends VBox {
         table.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         table.setPlaceholder(new Label("No files"));
+
+        // Drag source: only LibraryItems are draggable
+        table.setOnDragDetected(event -> {
+            List<LibraryItem> libs = table.getSelectionModel().getSelectedItems().stream()
+                .filter(LibraryItem.class::isInstance)
+                .map(LibraryItem.class::cast)
+                .toList();
+            if (libs.isEmpty()) return;
+
+            draggedItems = libs;
+            var db = table.startDragAndDrop(TransferMode.COPY);
+            ClipboardContent cc = new ClipboardContent();
+            cc.put(LIBRARY_ITEMS, libs.size() + " file(s)");
+            db.setContent(cc);
+            event.consume();
+        });
+        table.setOnDragDone(event -> {
+            draggedItems = null;
+            event.consume();
+        });
 
         getChildren().addAll(headerBar, table);
         VBox.setVgrow(table, Priority.ALWAYS);

@@ -1,11 +1,13 @@
 package com.github.daberkow.cybiko.manager.ui;
 
 import com.github.daberkow.cybiko.manager.cfs.CfsImage;
+import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
 import com.github.daberkow.cybiko.manager.model.LibraryFolder;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
+import javafx.scene.input.TransferMode;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -15,6 +17,7 @@ import java.nio.file.Path;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -43,6 +46,17 @@ public class SidebarPane extends VBox {
         }
     }
 
+    /** Smart list virtual folder types. */
+    public enum SmartListType {
+        RECENTLY_ADDED("Recently Added"),
+        NOT_IN_NVRAM("Not in Any NVRAM");
+
+        private final String label;
+        SmartListType(String label) { this.label = label; }
+        public String label() { return label; }
+        @Override public String toString() { return label; }
+    }
+
     private final ObservableList<ImageEntry> nvramEntries = FXCollections.observableArrayList();
     private final ListView<ImageEntry> nvramList = new ListView<>(nvramEntries);
 
@@ -52,6 +66,10 @@ public class SidebarPane extends VBox {
     private final ObservableList<LibraryFolder> libraryFolders = FXCollections.observableArrayList();
     private final ListView<LibraryFolder> libraryList = new ListView<>(libraryFolders);
 
+    private final ObservableList<SmartListType> smartListItems =
+        FXCollections.observableArrayList(SmartListType.RECENTLY_ADDED, SmartListType.NOT_IN_NVRAM);
+    private final ListView<SmartListType> smartList = new ListView<>(smartListItems);
+
     private boolean suppressSelection = false;
 
     private Consumer<ImageEntry> onNvramSelected;
@@ -59,6 +77,8 @@ public class SidebarPane extends VBox {
     private Consumer<LibraryFolder> onLibrarySelected;
     private Runnable onAddLibraryFolder;
     private Consumer<LibraryFolder> onRemoveLibraryFolder;
+    private BiConsumer<List<LibraryItem>, ImageEntry> onDropLibraryItems;
+    private Consumer<SmartListType> onSmartListSelected;
 
     public SidebarPane() {
         setPrefWidth(200);
@@ -109,6 +129,38 @@ public class SidebarPane extends VBox {
                 }
             };
 
+            // Drop target for library items
+            cell.setOnDragOver(event -> {
+                if (event.getGestureSource() != cell
+                        && event.getDragboard().hasContent(ContentListPane.LIBRARY_ITEMS)
+                        && cell.getItem() != null) {
+                    event.acceptTransferModes(TransferMode.COPY);
+                }
+                event.consume();
+            });
+            cell.setOnDragEntered(event -> {
+                if (event.getDragboard().hasContent(ContentListPane.LIBRARY_ITEMS)
+                        && cell.getItem() != null) {
+                    cell.getStyleClass().add("drop-target");
+                }
+                event.consume();
+            });
+            cell.setOnDragExited(event -> {
+                cell.getStyleClass().remove("drop-target");
+                event.consume();
+            });
+            cell.setOnDragDropped(event -> {
+                List<LibraryItem> items = ContentListPane.getDraggedItems();
+                if (items != null && !items.isEmpty() && cell.getItem() != null
+                        && onDropLibraryItems != null) {
+                    onDropLibraryItems.accept(items, cell.getItem());
+                    event.setDropCompleted(true);
+                } else {
+                    event.setDropCompleted(false);
+                }
+                event.consume();
+            });
+
             ContextMenu contextMenu = new ContextMenu();
             MenuItem closeItem = new MenuItem("Close");
             closeItem.setOnAction(e -> {
@@ -128,8 +180,29 @@ public class SidebarPane extends VBox {
             if (newVal != null) {
                 suppressSelection = true;
                 libraryList.getSelectionModel().clearSelection();
+                smartList.getSelectionModel().clearSelection();
                 suppressSelection = false;
                 if (onNvramSelected != null) onNvramSelected.accept(newVal);
+            }
+        });
+
+        // --- SMART LISTS section ---
+        Label smartHeader = new Label("SMART LISTS");
+        smartHeader.getStyleClass().add("section-header");
+        smartHeader.setMaxWidth(Double.MAX_VALUE);
+
+        smartList.setPrefHeight(56);
+        smartList.setMinHeight(56);
+        smartList.setMaxHeight(56);
+
+        smartList.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
+            if (suppressSelection) return;
+            if (newVal != null) {
+                suppressSelection = true;
+                nvramList.getSelectionModel().clearSelection();
+                libraryList.getSelectionModel().clearSelection();
+                suppressSelection = false;
+                if (onSmartListSelected != null) onSmartListSelected.accept(newVal);
             }
         });
 
@@ -186,6 +259,7 @@ public class SidebarPane extends VBox {
             if (newVal != null) {
                 suppressSelection = true;
                 nvramList.getSelectionModel().clearSelection();
+                smartList.getSelectionModel().clearSelection();
                 suppressSelection = false;
                 if (onLibrarySelected != null) onLibrarySelected.accept(newVal);
             }
@@ -194,7 +268,7 @@ public class SidebarPane extends VBox {
         VBox.setVgrow(nvramList, Priority.ALWAYS);
         VBox.setVgrow(libraryList, Priority.ALWAYS);
 
-        getChildren().addAll(nvramHeader, nvramList, libraryHeaderBox, libraryList);
+        getChildren().addAll(nvramHeader, nvramList, smartHeader, smartList, libraryHeaderBox, libraryList);
     }
 
     // --- NVRAM methods ---
@@ -308,5 +382,17 @@ public class SidebarPane extends VBox {
 
     public LibraryFolder getSelectedLibraryFolder() {
         return libraryList.getSelectionModel().getSelectedItem();
+    }
+
+    // --- Smart list methods ---
+
+    public void setOnSmartListSelected(Consumer<SmartListType> callback) {
+        this.onSmartListSelected = callback;
+    }
+
+    // --- Drag-and-drop ---
+
+    public void setOnDropLibraryItems(BiConsumer<List<LibraryItem>, ImageEntry> callback) {
+        this.onDropLibraryItems = callback;
     }
 }

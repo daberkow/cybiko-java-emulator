@@ -8,12 +8,17 @@ import com.github.daberkow.cybiko.manager.model.*;
 import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
 import com.github.daberkow.cybiko.manager.model.ContentItem.NvramItem;
 import com.github.daberkow.cybiko.manager.ui.*;
+import javafx.application.Platform;
+import javafx.scene.Node;
 import javafx.scene.control.*;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.stage.FileChooser;
-import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.util.Callback;
 
 import java.io.File;
 import java.io.PrintWriter;
@@ -25,11 +30,12 @@ import java.util.*;
 /**
  * Main application window layout.
  */
-public class MainWindow extends BorderPane {
+public class MainWindow extends StackPane {
 
     private static final DateTimeFormatter CSV_DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final Stage stage;
+    private final BorderPane layout = new BorderPane();
     private final SidebarPane sidebar = new SidebarPane();
     private final ContentListPane contentList = new ContentListPane();
     private final DetailPane detail = new DetailPane();
@@ -38,13 +44,14 @@ public class MainWindow extends BorderPane {
     private CfsImage currentImage;
     private Path currentPath;
 
-    private enum ViewMode { NVRAM, LIBRARY }
+    private enum ViewMode { NVRAM, LIBRARY, SMART_LIST }
     private ViewMode currentViewMode = ViewMode.NVRAM;
 
     // Library state
     private List<LibraryFolder> libraryFolders = new ArrayList<>();
     private final Map<LibraryFolder, List<AppEntry>> libraryCache = new HashMap<>();
     private LibraryFolder currentLibraryFolder;
+    private SidebarPane.SmartListType currentSmartList;
 
     // Recent files
     private List<Path> recentPaths = new ArrayList<>();
@@ -53,11 +60,12 @@ public class MainWindow extends BorderPane {
     public MainWindow(Stage stage) {
         this.stage = stage;
 
-        setTop(createMenuBar());
-        setLeft(sidebar);
-        setCenter(contentList);
-        setRight(detail);
-        setBottom(capacityBar);
+        layout.setTop(createMenuBar());
+        layout.setLeft(sidebar);
+        layout.setCenter(contentList);
+        layout.setRight(detail);
+        layout.setBottom(capacityBar);
+        getChildren().add(layout);
 
         // Wire NVRAM selection
         sidebar.setOnSelectionChanged(entry -> {
@@ -65,6 +73,7 @@ public class MainWindow extends BorderPane {
             currentPath = entry.path();
             currentViewMode = ViewMode.NVRAM;
             currentLibraryFolder = null;
+            currentSmartList = null;
             refreshFileList();
             detail.setNvramAvailable(true);
             updateTitle();
@@ -73,9 +82,16 @@ public class MainWindow extends BorderPane {
         // Wire library selection
         sidebar.setOnLibrarySelected(folder -> {
             currentLibraryFolder = folder;
+            currentSmartList = null;
             currentViewMode = ViewMode.LIBRARY;
             refreshLibraryView();
         });
+
+        // Wire smart list selection
+        sidebar.setOnSmartListSelected(this::showSmartList);
+
+        // Wire drag-and-drop
+        sidebar.setOnDropLibraryItems(this::handleDropOnNvram);
 
         sidebar.setOnAddLibraryFolder(this::addLibraryFolder);
         sidebar.setOnRemoveLibraryFolder(this::removeLibraryFolder);
@@ -191,7 +207,7 @@ public class MainWindow extends BorderPane {
         Menu helpMenu = new Menu("Help");
 
         MenuItem aboutItem = new MenuItem("About");
-        aboutItem.setOnAction(e -> new AboutDialog().showAndWait());
+        aboutItem.setOnAction(e -> showDialog(new AboutDialog()));
 
         helpMenu.getItems().add(aboutItem);
 
@@ -235,6 +251,7 @@ public class MainWindow extends BorderPane {
             currentImage = image;
             currentPath = path;
             currentViewMode = ViewMode.NVRAM;
+            currentSmartList = null;
             detail.setNvramAvailable(true);
             refreshFileList();
             addToRecentFiles(path);
@@ -257,7 +274,7 @@ public class MainWindow extends BorderPane {
             ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
             alert.getButtonTypes().setAll(saveBtn, dontSaveBtn, cancelBtn);
 
-            Optional<ButtonType> result = alert.showAndWait();
+            Optional<ButtonType> result = showDialog(alert);
             if (result.isEmpty() || result.get() == cancelBtn) return;
             if (result.get() == saveBtn) {
                 currentImage = entry.image();
@@ -275,6 +292,9 @@ public class MainWindow extends BorderPane {
             contentList.clear();
             capacityBar.update(null, null);
             detail.showItem(null);
+        }
+        if (currentViewMode == ViewMode.SMART_LIST && currentSmartList != null) {
+            showSmartList(currentSmartList);
         }
         updateTitle();
     }
@@ -316,7 +336,7 @@ public class MainWindow extends BorderPane {
         nameDialog.setTitle("New NVRAM Image");
         nameDialog.setHeaderText("Create new " + geom.name() + " image");
         nameDialog.setContentText("Image name:");
-        Optional<String> nameResult = nameDialog.showAndWait();
+        Optional<String> nameResult = showDialog(nameDialog);
         if (nameResult.isEmpty()) return;
 
         String name = nameResult.get().strip();
@@ -390,10 +410,13 @@ public class MainWindow extends BorderPane {
 
     private void addLibraryFolder() {
         LibraryFolderDialog dialog = new LibraryFolderDialog(stage);
-        dialog.showAndWait().ifPresent(folder -> {
+        showDialog(dialog).ifPresent(folder -> {
             libraryFolders.add(folder);
             sidebar.setLibraryFolders(libraryFolders);
             saveLibraryConfig();
+            if (currentViewMode == ViewMode.SMART_LIST && currentSmartList != null) {
+                showSmartList(currentSmartList);
+            }
         });
     }
 
@@ -407,12 +430,17 @@ public class MainWindow extends BorderPane {
             detail.showItem(null);
         }
         saveLibraryConfig();
+        if (currentViewMode == ViewMode.SMART_LIST && currentSmartList != null) {
+            showSmartList(currentSmartList);
+        }
     }
 
     private void refreshLibrary() {
         libraryCache.clear();
-        if (currentLibraryFolder != null) {
+        if (currentViewMode == ViewMode.LIBRARY && currentLibraryFolder != null) {
             refreshLibraryView();
+        } else if (currentViewMode == ViewMode.SMART_LIST && currentSmartList != null) {
+            showSmartList(currentSmartList);
         }
     }
 
@@ -453,10 +481,8 @@ public class MainWindow extends BorderPane {
             return entries.get(0).image();
         }
 
-        // Multiple NVRAMs open — use Dialog+ComboBox (avoids ChoiceDialog resizing parent)
+        // Multiple NVRAMs open — use Dialog+ComboBox
         Dialog<SidebarPane.ImageEntry> dialog = new Dialog<>();
-        dialog.initOwner(stage);
-        dialog.initModality(Modality.WINDOW_MODAL);
         dialog.setResizable(false);
         dialog.setTitle("Select NVRAM");
         dialog.setHeaderText("Multiple NVRAM images are open.");
@@ -479,8 +505,7 @@ public class MainWindow extends BorderPane {
 
         dialog.setResultConverter(btn -> btn == okBtn ? combo.getValue() : null);
 
-        Optional<SidebarPane.ImageEntry> result = dialog.showAndWait();
-        return result.map(SidebarPane.ImageEntry::image).orElse(null);
+        return showDialog(dialog).map(SidebarPane.ImageEntry::image).orElse(null);
     }
 
     // ---- NVRAM operations ----
@@ -539,12 +564,16 @@ public class MainWindow extends BorderPane {
     private void addLibraryItemToNvram(LibraryItem item) {
         CfsImage targetImage = pickTargetNvram();
         if (targetImage == null) return;
+        addLibraryItemToImage(item, targetImage);
+    }
 
+    /** Core logic: add a library item to a specific NVRAM image. */
+    private boolean addLibraryItemToImage(LibraryItem item, CfsImage targetImage) {
         try {
             byte[] data = Files.readAllBytes(item.entry().path());
             if (!targetImage.addFile(item.entry().name(), data)) {
                 showError("Add Failed", "Not enough space or filename too long.");
-                return;
+                return false;
             }
             sidebar.recordAdd(targetImage);
             if (targetImage == currentImage) {
@@ -553,12 +582,27 @@ public class MainWindow extends BorderPane {
                 sidebar.refreshEntry(targetImage);
                 updateTitle();
             }
-            // Refresh library view to update "In NVRAM" status
+            // Refresh library/smart list view to update "In NVRAM" status
             if (currentViewMode == ViewMode.LIBRARY) {
                 refreshLibraryView();
+            } else if (currentViewMode == ViewMode.SMART_LIST && currentSmartList != null) {
+                showSmartList(currentSmartList);
             }
+            return true;
         } catch (Exception ex) {
             showError("Failed to add file", ex.getMessage());
+            return false;
+        }
+    }
+
+    private void handleDropOnNvram(List<LibraryItem> items, SidebarPane.ImageEntry target) {
+        CfsImage targetImage = target.image();
+        int added = 0;
+        for (LibraryItem item : items) {
+            if (addLibraryItemToImage(item, targetImage)) added++;
+        }
+        if (added > 0) {
+            sidebar.selectNvramEntry(targetImage);
         }
     }
 
@@ -573,6 +617,8 @@ public class MainWindow extends BorderPane {
     private void afterNvramModification() {
         if (currentViewMode == ViewMode.NVRAM) {
             refreshFileList();
+        } else if (currentViewMode == ViewMode.SMART_LIST && currentSmartList != null) {
+            showSmartList(currentSmartList);
         }
         sidebar.refreshSelectedEntry();
         capacityBar.update(currentImage, currentImageName());
@@ -594,7 +640,7 @@ public class MainWindow extends BorderPane {
             alert.setHeaderText("Image Valid");
             alert.setContentText("All checks passed — checksums valid, block structure consistent, "
                 + "no orphaned blocks. CyOS will accept this image without flash repair.");
-            alert.showAndWait();
+            showDialog(alert);
             return;
         }
 
@@ -623,12 +669,12 @@ public class MainWindow extends BorderPane {
             ButtonType closeBtn = new ButtonType("Close", ButtonBar.ButtonData.CANCEL_CLOSE);
             alert.getButtonTypes().setAll(repairBtn, closeBtn);
 
-            Optional<ButtonType> choice = alert.showAndWait();
+            Optional<ButtonType> choice = showDialog(alert);
             if (choice.isPresent() && choice.get() == repairBtn) {
                 performRepair();
             }
         } else {
-            alert.showAndWait();
+            showDialog(alert);
         }
     }
 
@@ -692,7 +738,7 @@ public class MainWindow extends BorderPane {
         textArea.setPrefColumnCount(60);
 
         resultAlert.getDialogPane().setContent(textArea);
-        resultAlert.showAndWait();
+        showDialog(resultAlert);
     }
 
     private String buildValidationReport(CfsValidator.Result result) {
@@ -727,7 +773,7 @@ public class MainWindow extends BorderPane {
             showError("No NVRAM Image", "Open an NVRAM image first.");
             return;
         }
-        new NvramPropertiesDialog(currentImage, currentPath).showAndWait();
+        showDialog(new NvramPropertiesDialog(currentImage, currentPath));
     }
 
     private void exportCsv() {
@@ -789,6 +835,48 @@ public class MainWindow extends BorderPane {
 
         HexViewerDialog hexViewer = new HexViewerDialog(title, data);
         hexViewer.show();
+    }
+
+    // ---- Smart lists ----
+
+    private void showSmartList(SidebarPane.SmartListType type) {
+        currentSmartList = type;
+        currentViewMode = ViewMode.SMART_LIST;
+        currentLibraryFolder = null;
+
+        List<AppEntry> allEntries = getAllLibraryEntries();
+        Map<String, List<String>> nvramFileMap = getNvramFileMap();
+
+        List<AppEntry> filtered;
+        switch (type) {
+            case RECENTLY_ADDED -> {
+                filtered = allEntries.stream()
+                    .sorted(Comparator.comparing(AppEntry::lastModified).reversed())
+                    .limit(20)
+                    .toList();
+            }
+            case NOT_IN_NVRAM -> {
+                Set<String> inNvram = nvramFileMap.keySet();
+                filtered = allEntries.stream()
+                    .filter(e -> !inNvram.contains(e.name()))
+                    .toList();
+            }
+            default -> filtered = List.of();
+        }
+
+        contentList.setLibraryFiles(filtered, type.label(), nvramFileMap);
+        capacityBar.update(currentImage, currentImage != null ? currentImageName() : null);
+        detail.showItem(null);
+        detail.setNvramAvailable(currentImage != null);
+    }
+
+    private List<AppEntry> getAllLibraryEntries() {
+        List<AppEntry> all = new ArrayList<>();
+        for (LibraryFolder folder : libraryFolders) {
+            List<AppEntry> entries = libraryCache.computeIfAbsent(folder, LibraryScanner::scan);
+            all.addAll(entries);
+        }
+        return all;
     }
 
     // ---- View refresh ----
@@ -857,7 +945,7 @@ public class MainWindow extends BorderPane {
                 ButtonType cancelBtn = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
                 alert.getButtonTypes().setAll(saveBtn, dontSaveBtn, cancelBtn);
 
-                Optional<ButtonType> result = alert.showAndWait();
+                Optional<ButtonType> result = showDialog(alert);
                 if (result.isEmpty() || result.get() == cancelBtn) {
                     return false; // User cancelled
                 }
@@ -888,11 +976,68 @@ public class MainWindow extends BorderPane {
         return (entry != null) ? entry.displayName() : "Untitled";
     }
 
+    /**
+     * Show a dialog as an in-window overlay instead of a separate OS window.
+     * On Wayland compositors (Cosmic, Mutter), opening a second top-level window
+     * while the main window is maximized causes the compositor to un-maximize and
+     * tile the windows. Since the compositor owns window placement, client-side
+     * setMaximized() requests are ignored. The only fix is to never create a
+     * second window: we render the DialogPane as a centered overlay inside the
+     * main StackPane and use a nested event loop to preserve blocking semantics.
+     */
+    @SuppressWarnings("unchecked")
+    private <T> Optional<T> showDialog(Dialog<T> dialog) {
+        DialogPane pane = dialog.getDialogPane();
+
+        // Create semi-transparent scrim overlay
+        StackPane overlay = new StackPane();
+        overlay.getStyleClass().add("dialog-overlay");
+
+        // Size the dialog pane to its preferred size, centered in overlay
+        pane.setMaxWidth(Region.USE_PREF_SIZE);
+        pane.setMaxHeight(Region.USE_PREF_SIZE);
+        overlay.getChildren().add(pane);
+
+        Object loopKey = new Object();
+        Callback<ButtonType, T> converter = dialog.getResultConverter();
+
+        // Wire each button to exit the nested event loop with the converted result
+        for (ButtonType bt : pane.getButtonTypes()) {
+            Node btnNode = pane.lookupButton(bt);
+            if (btnNode instanceof Button btn) {
+                btn.setOnAction(e -> {
+                    T result = converter != null ? converter.call(bt) : (T) bt;
+                    Platform.exitNestedEventLoop(loopKey, result);
+                });
+            }
+        }
+
+        // ESC dismisses (same as cancel/close)
+        pane.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
+            if (e.getCode() == KeyCode.ESCAPE) {
+                Platform.exitNestedEventLoop(loopKey, null);
+                e.consume();
+            }
+        });
+
+        // Show overlay on top of main content
+        getChildren().add(overlay);
+        pane.requestFocus();
+
+        // Block until a button is clicked or ESC is pressed
+        T result = (T) Platform.enterNestedEventLoop(loopKey);
+
+        // Remove overlay
+        getChildren().remove(overlay);
+
+        return Optional.ofNullable(result);
+    }
+
     private void showError(String title, String message) {
         Alert alert = new Alert(Alert.AlertType.ERROR);
         alert.setTitle(title);
         alert.setHeaderText(null);
         alert.setContentText(message);
-        alert.showAndWait();
+        showDialog(alert);
     }
 }
