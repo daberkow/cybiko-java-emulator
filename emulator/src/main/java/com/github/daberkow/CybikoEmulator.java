@@ -138,6 +138,8 @@ public class CybikoEmulator {
     public void setSpeaker(SpeakerOutput speaker) {
         this.speaker = speaker;
         bus.setSpeakerOutput(speaker);
+        // Wire Timer16 ch1 TIOCB1 output compare to speaker (PWM audio)
+        timer16[1].setOutputBCallback(level -> speaker.setLevel(level));
     }
 
     public void setHeadless(boolean headless) {
@@ -193,8 +195,12 @@ public class CybikoEmulator {
             boolean t16_4_run = numTimer16 > 4 && timer16[4].isRunning();
             boolean t16_5_run = numTimer16 > 5 && timer16[5].isRunning();
 
+            // Begin audio frame for transition tracking
+            if (speaker != null) speaker.beginFrame();
+
             long frameStartNanos = System.nanoTime();
             for (int i = 0; i < cycleBudget; i++) {
+                if (speaker != null) speaker.setFrameCycle(i);
                 if (t8_0_run) timer8_0.tick();
                 if (t8_1_run) timer8_1.tick();
                 if (t16_0_run) timer16[0].tick();

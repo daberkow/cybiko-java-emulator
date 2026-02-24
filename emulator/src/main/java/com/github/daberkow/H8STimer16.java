@@ -1,5 +1,7 @@
 package com.github.daberkow;
 
+import java.util.function.IntConsumer;
+
 /**
  * Simple H8S 16-bit timer channel emulation (TPU - Timer Pulse Unit).
  *
@@ -11,6 +13,25 @@ package com.github.daberkow;
  *   - TSR  (Timer Status Register)
  *   - TCNT (Timer Counter, 16-bit)
  *   - TGR  (Timer General Registers, 2-4 per channel)
+ *
+ * TIOR (Timer I/O Control Register) controls output compare pin behavior:
+ *   For channels with 2 TGR: bits 3-0 = IOA, bits 7-4 = IOB
+ *   IOx nibble encoding:
+ *     0000 = disabled
+ *     0001 = initial LOW,  output LOW  on match
+ *     0010 = initial LOW,  output HIGH on match
+ *     0011 = initial LOW,  toggle on match
+ *     0100 = disabled
+ *     0101 = initial HIGH, output LOW  on match
+ *     0110 = initial HIGH, output HIGH on match
+ *     0111 = initial HIGH, toggle on match
+ *     1xxx = input capture (no output)
+ *
+ * PWM behavior: when counter clears on TGRA match (clear_mode=1),
+ * the TIOCB output returns to its initial level. Combined with TGRB
+ * compare match action, this creates a PWM waveform.
+ *
+ * Channel 1 TIOCB1 = Port 1 bit 3 = speaker output on Cybiko XT.
  *
  * Clock source mapping is per-channel (from MAME h8s2319.cpp):
  *   Ch0: /1, /4, /16, /64, extA, extB, extC, extD
@@ -44,6 +65,11 @@ public class H8STimer16 {
     private final H8SCpu cpu;
     private final int[] clockDivisors; // per-channel clock source table
     private int interruptCount = 0; // Debug counter
+
+    // Output compare pin state
+    private int outputALevel = 0;
+    private int outputBLevel = 0;
+    private IntConsumer outputBCallback;  // Called when TIOCB pin changes
 
     // TIER bits
     private static final int TIER_TGIEA = 0x01; // TGR Interrupt Enable A
@@ -89,6 +115,45 @@ public class H8STimer16 {
         this.clockDivisors = CHANNEL_CLOCK_DIVISORS[channel];
     }
 
+    /** Set callback for TIOCB output compare pin changes. */
+    public void setOutputBCallback(IntConsumer callback) {
+        this.outputBCallback = callback;
+    }
+
+    /**
+     * Get the initial output level from a TIOR nibble.
+     * Returns 0 (LOW), 1 (HIGH), or -1 (output disabled/input capture).
+     */
+    private static int tiorInitialLevel(int nibble) {
+        if ((nibble & 0x08) != 0) return -1;      // Input capture
+        if ((nibble & 0x03) == 0) return -1;       // Disabled
+        return (nibble & 0x04) != 0 ? 1 : 0;      // Bit 2 = initial level
+    }
+
+    /**
+     * Get the output level after a compare match.
+     * Returns 0, 1, or -1 (no output change).
+     */
+    private static int tiorMatchLevel(int nibble, int currentLevel) {
+        if ((nibble & 0x08) != 0) return -1;  // Input capture
+        return switch (nibble & 0x03) {
+            case 1 -> 0;                       // Clear (LOW)
+            case 2 -> 1;                       // Set (HIGH)
+            case 3 -> currentLevel ^ 1;        // Toggle
+            default -> -1;                     // Disabled
+        };
+    }
+
+    /** Update output B level and fire callback if changed. */
+    private void setOutputB(int newLevel) {
+        if (newLevel >= 0 && newLevel != outputBLevel) {
+            outputBLevel = newLevel;
+            if (outputBCallback != null) {
+                outputBCallback.accept(newLevel);
+            }
+        }
+    }
+
     /** Read 8-bit register by offset. */
     public int read8(int offset) {
         return switch (offset) {
@@ -112,7 +177,11 @@ public class H8STimer16 {
         switch (offset) {
             case 0 -> { tcr = value & 0xFF; updateCachedDivisor(); }
             case 1 -> tmdr = value & 0xFF;
-            case 2 -> tior = value & 0xFF;
+            case 2 -> {
+                tior = value & 0xFF;
+                // Set output pins to initial level when TIOR is configured
+                setOutputB(tiorInitialLevel((tior >> 4) & 0x0F));
+            }
             case 4 -> tier = value & 0xFF;
             case 5 -> tsr = tsr & (value | ~(TSR_TGFA | TSR_TGFB | TSR_OVF));
             case 6 -> tcnt = ((value & 0xFF) << 8) | (tcnt & 0xFF);
@@ -152,6 +221,10 @@ public class H8STimer16 {
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
         updateCachedDivisor();
+        // When timer starts, ensure output is at initial level
+        if (enabled) {
+            setOutputB(tiorInitialLevel((tior >> 4) & 0x0F));
+        }
     }
     public boolean isEnabled() { return enabled; }
     public int getInterruptCount() { return interruptCount; }
@@ -178,9 +251,18 @@ public class H8STimer16 {
                 cpu.requestInterrupt(vecTGIA);
                 interruptCount++;
             }
-            // Clear on compare match A if configured
+            // Output compare A: TIOR bits 3-0
+            int newA = tiorMatchLevel(tior & 0x0F, outputALevel);
+            if (newA >= 0) {
+                outputALevel = newA;
+            }
+            // Clear on compare match A
             int clearMode = (tcr >> 5) & 0x03;
-            if (clearMode == 1) tcnt = 0;
+            if (clearMode == 1) {
+                tcnt = 0;
+                // PWM: when counter clears, output B returns to initial level
+                setOutputB(tiorInitialLevel((tior >> 4) & 0x0F));
+            }
         }
 
         // Compare match B
@@ -191,6 +273,9 @@ public class H8STimer16 {
                 cpu.requestInterrupt(vecTGIB);
                 interruptCount++;
             }
+            // Output compare B: TIOR bits 7-4
+            int newB = tiorMatchLevel((tior >> 4) & 0x0F, outputBLevel);
+            setOutputB(newB);
             int clearMode = (tcr >> 5) & 0x03;
             if (clearMode == 2) tcnt = 0;
         }

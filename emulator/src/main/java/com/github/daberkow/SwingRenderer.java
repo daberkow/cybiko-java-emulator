@@ -109,7 +109,7 @@ public class SwingRenderer implements FrameBufferRenderer {
             case KeyEvent.VK_7 -> { setFnLetter(1, 0x0040, pressed); return; }
             case KeyEvent.VK_8 -> { setFnLetter(0, 0x1000, pressed); return; }
             case KeyEvent.VK_9 -> { setFnLetter(0, 0x2000, pressed); return; }
-            case KeyEvent.VK_0 -> { setFnLetter(13, 0x0010, pressed); return; }
+            case KeyEvent.VK_0 -> { setFnLetter(9, 0x0010, pressed); return; }
         }
 
         int col = -1, bit = 0;
@@ -170,12 +170,11 @@ public class SwingRenderer implements FrameBufferRenderer {
             case KeyEvent.VK_CONTROL -> { col = 7; bit = 0x8000; } // Fn
             // Column A.8
             case KeyEvent.VK_SHIFT  -> { col = 8; bit = 0x8000; }
-            // Column A.13
-            case KeyEvent.VK_END    -> { col = 13; bit = 0x0001; } // Help
-            case KeyEvent.VK_PERIOD -> { col = 13; bit = 0x0002; }
-            case KeyEvent.VK_P      -> { col = 13; bit = 0x0010; }
-            // Column A.14
-            case KeyEvent.VK_F8     -> { col = 14; bit = 0x8000; } // On/Off
+            // Column A.9 - P, period, Help, semicolon (per web emulator)
+            case KeyEvent.VK_END       -> { col = 9; bit = 0x0001; } // Help
+            case KeyEvent.VK_PERIOD    -> { col = 9; bit = 0x0002; }
+            case KeyEvent.VK_SEMICOLON -> { col = 9; bit = 0x0008; }
+            case KeyEvent.VK_P         -> { col = 9; bit = 0x0010; }
         }
         if (col >= 0) {
             pressKeyWithHold(col, bit, pressed);
