@@ -30,6 +30,14 @@ public class CybikoEmulator {
     private boolean running = false;
     private boolean headless = false;
     private Path nvramPath;
+    private Thread emulatorThread;
+
+    public interface StateListener {
+        void onStateChanged(boolean running);
+    }
+    private StateListener stateListener;
+    public void setStateListener(StateListener listener) { this.stateListener = listener; }
+    public boolean isRunning() { return running; }
 
     // V2: RTOS set_task_state address for auto-resolving service startup waits.
     // V2 CyOS starts RF driver, RF monitor, messenger, and receiver services during
@@ -155,8 +163,9 @@ public class CybikoEmulator {
     public H8STimer16 getTimer16(int ch) { return ch < timer16.length ? timer16[ch] : null; }
     public int getTimer16Count() { return timer16.length; }
 
-    /** Initialize and start running. */
+    /** Initialize and start running (non-blocking). */
     public void start() {
+        if (running) return;
         cpu.reset();
 
         System.out.println("=== Initial state (" + config.name + ") ===");
@@ -165,7 +174,10 @@ public class CybikoEmulator {
         System.out.println();
 
         running = true;
-        run();
+        emulatorThread = new Thread(this::run, "emulator");
+        emulatorThread.setDaemon(true);
+        emulatorThread.start();
+        if (stateListener != null) stateListener.onStateChanged(true);
     }
 
     private void run() {
@@ -297,6 +309,9 @@ public class CybikoEmulator {
         if (cpu.isHalted()) System.out.println("Reason: CPU halted");
         else if (!running) System.out.println("Reason: Stopped by user");
         cpu.dumpRegisters();
+        if (stateListener != null) {
+            javax.swing.SwingUtilities.invokeLater(() -> stateListener.onStateChanged(false));
+        }
     }
 
     public void stop() {
@@ -304,7 +319,7 @@ public class CybikoEmulator {
     }
 
     /** Save external RAM to the NVRAM file. */
-    private void saveNvram() {
+    public void saveNvram() {
         if (nvramPath == null) return;
         try {
             byte[] data = externalRam.getRawData();
@@ -314,6 +329,10 @@ public class CybikoEmulator {
             System.err.println("Error saving NVRAM: " + e.getMessage());
         }
     }
+
+    public void setNvramPath(Path path) { this.nvramPath = path; }
+    public Path getNvramPath() { return nvramPath; }
+    public Thread getEmulatorThread() { return emulatorThread; }
 
     // --- Main entry point ---
     public static void main(String[] args) {
@@ -480,5 +499,11 @@ public class CybikoEmulator {
         }
 
         emu.start();
+        // Wait for emulator thread to finish (it's a daemon, so JVM can still exit)
+        try {
+            emu.getEmulatorThread().join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }
