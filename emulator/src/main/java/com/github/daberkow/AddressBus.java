@@ -1,5 +1,8 @@
 package com.github.daberkow;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Memory-mapped I/O bus for Cybiko emulators (V1, V2, XT).
  * Routes reads/writes to the correct device based on address and machine config.
@@ -45,6 +48,10 @@ public class AddressBus {
 
     // Serial output buffers (one per SCI channel)
     private final StringBuilder[] sciOutput = {new StringBuilder(), new StringBuilder(), new StringBuilder()};
+
+    // SCI0 TDR raw hex log for radio protocol analysis
+    private final List<Integer> sci0TdrLog = new ArrayList<>();
+    public List<Integer> getSci0TdrLog() { return sci0TdrLog; }
 
     // Speaker state - Port 1 bit 3 (TIOCB1) drives the speaker
     private int speakerLevel = 0;
@@ -548,6 +555,9 @@ public class AddressBus {
             if (reg == 3) { // TDR - Transmit Data Register
                 char c = (char)(value & 0x7F);
                 sciOutput[channel].append(c >= 0x20 ? c : (c == '\n' ? '\n' : '.'));
+                if (channel == 0) {
+                    sci0TdrLog.add(value & 0xFF);
+                }
                 // V1: SCI1 TDR writes go to SPI flash
                 if (channel == 1 && spiFlash != null) {
                     sci1Rdr = spiFlash.transfer(value & 0xFF);

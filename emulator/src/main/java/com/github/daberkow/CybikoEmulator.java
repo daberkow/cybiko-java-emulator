@@ -293,6 +293,13 @@ public class CybikoEmulator {
                     timer8_1.getTcr(), timer8_1.getInterruptCount());
                 frameTotalNanos = 0;
                 frameTimingSamples = 0;
+
+                if (!bus.getSci0TdrLog().isEmpty()) {
+                    StringBuilder hex = new StringBuilder("[SCI0-TX] ");
+                    for (int b : bus.getSci0TdrLog()) hex.append(String.format("%02X ", b));
+                    System.err.println(hex);
+                    bus.getSci0TdrLog().clear();
+                }
             }
 
             // Precise frame rate limiting (if we have a display)
