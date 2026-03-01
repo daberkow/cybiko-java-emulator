@@ -357,6 +357,7 @@ public class CybikoEmulator {
             System.out.println("  --app <file>      - Add .app to NVRAM before booting");
             System.out.println("  --list-apps       - List apps in NVRAM and exit");
             System.out.println("  --mute            - Disable audio output");
+            System.out.println("  --remote-display <port> - Enable remote display TCP server on port");
             System.exit(1);
         }
 
@@ -364,6 +365,7 @@ public class CybikoEmulator {
         boolean trace = false;
         boolean mute = false;
         boolean listApps = false;
+        int remotePort = 0;
         MachineConfig.MachineType machineType = MachineConfig.MachineType.XT;
 
         // Parse arguments
@@ -397,6 +399,7 @@ public class CybikoEmulator {
                 case "--nvram" -> { if (i + 1 < args.length) nvramFile = args[++i]; }
                 case "--app" -> { if (i + 1 < args.length) appPaths.add(args[++i]); }
                 case "--dataflash" -> { if (i + 1 < args.length) spiFlashPath = args[++i]; }
+                case "--remote-display" -> { if (i + 1 < args.length) remotePort = Integer.parseInt(args[++i]); }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
@@ -495,7 +498,18 @@ public class CybikoEmulator {
         if (!headless) {
             SwingRenderer swing = new SwingRenderer(config);
             swing.setBus(emu.getBus());
-            emu.setRenderer(swing);
+            if (remotePort > 0) {
+                try {
+                    RemoteDisplayServer remote = new RemoteDisplayServer(remotePort, emu.getBus(), emu.getLcd());
+                    remote.start();
+                    emu.setRenderer(new MultiRenderer(swing, remote));
+                } catch (IOException ex) {
+                    System.err.println("Error starting remote display server: " + ex.getMessage());
+                    System.exit(1);
+                }
+            } else {
+                emu.setRenderer(swing);
+            }
 
             // Wire menu bar
             swing.buildMenuBar(
@@ -571,7 +585,18 @@ public class CybikoEmulator {
                 Thread.currentThread().interrupt();
             }
         } else {
-            emu.setRenderer(new ConsoleRenderer());
+            if (remotePort > 0) {
+                try {
+                    RemoteDisplayServer remote = new RemoteDisplayServer(remotePort, emu.getBus(), emu.getLcd());
+                    remote.start();
+                    emu.setRenderer(remote);
+                } catch (IOException ex) {
+                    System.err.println("Error starting remote display server: " + ex.getMessage());
+                    System.exit(1);
+                }
+            } else {
+                emu.setRenderer(new ConsoleRenderer());
+            }
 
             // Save NVRAM on shutdown (JVM exit)
             if (emu.getNvramPath() != null) {
