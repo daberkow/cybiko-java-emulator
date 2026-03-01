@@ -151,13 +151,16 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 - `H8SCpu` - CPU emulation core (~150 instructions). Pending interrupts use sorted int[]
   (not TreeSet) for low overhead. Debug profiling gated behind `debug` flag.
 - `H8STimer8` - 8-bit timer with compare match and overflow interrupts. Lean tick() path.
-- `H8STimer16` - 16-bit timer (TPU) with per-channel clock source tables
+- `H8STimer16` - 16-bit timer (TPU) with per-channel clock source tables and TIOR
+  output compare pin emulation (initial level, set/clear/toggle on match, PWM reset)
 - `Memory` - Simple byte-array backed memory
 - `HD66421Lcd` - LCD controller emulation. Reuses framebuffer array (no per-frame allocation).
 - `PCF8593Rtc` - Real-time clock with I2C bit-bang protocol (matches MAME pcf8593.cpp)
 - `CfsImage` - CFS (Cybiko File System) image builder/reader (matches MAME cybikoxt.cpp)
-- `SpeakerOutput` - 1-bit speaker audio via javax.sound.sampled (44.1kHz, 8-bit mono).
-  Takes clock rate from MachineConfig for correct sample timing.
+- `SpeakerOutput` - 1-bit speaker audio via javax.sound.sampled (48kHz, 8-bit mono).
+  Transition-based waveform reconstruction: records level changes with cycle timestamps
+  during each frame, then resamples to audio rate for accurate PWM reproduction.
+  Driven by Timer16 ch1 TIOCB1 output compare callback (not Port 1 DR polling).
 - `FrameBufferRenderer` / `SwingRenderer` / `ConsoleRenderer` - Display
 - `SwingRenderer` - Swing GUI with keyboard input. Bulk setRGB for rendering. Takes
   MachineConfig to select XT (15-col, Fn+letter numbers) or V1 (9-col, dedicated numbers)
@@ -461,7 +464,7 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - DMA controller handles keyboard matrix scans (XT only; V1/V2 use direct reads)
 - App loading via CFS filesystem (--app wraps .app files in proper CFS block format)
 - Persistent NVRAM (--nvram saves/restores external RAM between sessions)
-- Speaker audio output (1-bit, Port 1 bit 3 / TIOCB1)
+- Speaker audio output (1-bit PWM via Timer16 ch1 TIOCB1 output compare, 48kHz)
 - VRAM CRC32 hash and frame timing in STATUS log
 - Frame time ~4ms (24% of 16.7ms budget), JIT-optimized after first second
 - No unimplemented opcodes in the current execution path
@@ -696,8 +699,13 @@ val = 0; for each byte i: val = (val ^ data[i] ^ i) << 1; val |= (val >> 16) & 1
 ```
 
 ### Speaker
-1-bit output on Port 1 bit 3 (TIOCB1). AddressBus intercepts writes to Port 1 DR
-(0xFFFF60) and tracks the speaker level. SpeakerOutput converts to 44.1kHz PCM audio.
+1-bit PWM output driven by Timer16 channel 1 TIOCB1 output compare pin. CyOS configures
+TIOR to toggle the TIOCB1 pin on TGRB compare match, with counter clearing on TGRA match,
+creating a PWM waveform. H8STimer16 emulates the TIOR output compare behavior (initial
+level, set/clear/toggle on match, PWM reset on counter clear) and fires a callback to
+SpeakerOutput on each transition. SpeakerOutput records transitions with cycle timestamps
+per frame, then resamples to 48kHz PCM for javax.sound.sampled playback. Silence (no
+transitions) outputs center value (128) to avoid DC offset clicks.
 
 ## Tools
 
