@@ -281,50 +281,7 @@ V2 currently stalls at phase 3 (Cybiko logo). The desktop app never starts becau
 RF hardware init never completes. Service stub resolves non-RF set_task_state calls.
 
 ## Bugs Found & Fixed
-
-### 1. LCD alternating black rows
-- **Symptom**: LCD displayed alternating black/white rows
-- **Root cause**: HD66421 register masking used `& 0x11` instead of proper per-register masks
-- **Fix**: Corrected register index masking
-
-### 2. Timer16 interrupt flooding
-- **Symptom**: CPU overwhelmed by timer interrupts
-- **Root cause**: Timer16 fired interrupts every tick instead of on flag transition 0->1
-- **Fix**: Added flag-transition guard (only fire interrupt when status flag goes from 0 to 1)
-
-### 3. CPU halted permanently with masked interrupts
-- **Symptom**: CPU entered SLEEP and never woke up, even with pending interrupts
-- **Root cause**: `processInterrupts()` returned false when I flag was set (CCR bit 7),
-  so CPU stayed in halted state forever
-- **Fix**: On real H8S, any interrupt request wakes CPU from sleep regardless of I flag.
-  Added check in step() to wake CPU when halted and pending interrupts exist.
-
-### 4. MOV.L @ERs+, ERd post-increment clobber when Rs==Rd
-- **Symptom**: CyOS crashed after task stack switch. `MOV.L @ER7+, ER7` (restore SP)
-  returned SP+4 instead of the loaded value.
-- **Root cause**: `er[rl] = bus.read32(er[rh]); er[rh] += 4;` - when rh==rl, the
-  post-increment overwrites the loaded value.
-- **Fix**: Use temp variable: `val = read; increment; store val to dest`.
-  Applied same pattern to all MOV pre-dec/post-inc variants (B, W, L sizes).
-
-### 5. Timer16 per-channel clock source mapping
-- **Symptom**: Timer delay loops ran at wrong speed
-- **Root cause**: Used a single fixed prescaler table for all channels. In H8S/2319,
-  TPSC values 4-7 map to different sources per channel (some are external clocks,
-  some are prescalers like /256 or /1024).
-- **Fix**: Implemented per-channel clock divisor tables matching MAME h8s2319.cpp.
-
-### 6. Port A input register address mismatch
-- **Symptom**: CyOS showed "Recharge the batteries" blinking on LCD despite
-  Port A data register (0xFFFF69) returning 0xC0 (battery charged)
-- **Root cause**: H8S has TWO register addresses per port:
-  - 0xFFFF59: Port A **input data register** (`port_r()`) - reads actual pin state
-  - 0xFFFF69: Port A **data register** (`dr_r()`) - reads output latch
-  CyOS reads 0xFFFF59 for battery status, but we only handled 0xFFFF69.
-  Reads from 0xFFFF59 fell through to uninitialized on-chip RAM (0x00),
-  which has bit 6 = 0 → battery not charged.
-- **Fix**: Added port input register handlers for 0xFFFF50-0xFFFF5E range.
-  Port A input (0xFFFF59) returns 0xC0, Port F input (0xFFFF5E) returns RTC SDA.
+Full details in [docs/bugs-fixed.md](docs/bugs-fixed.md). Key lessons for future development:
 
 ### H8S Port Register Addresses
 Two register ranges for port I/O (from MAME h8s2319.cpp):
@@ -335,106 +292,15 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 | Data Register   | 0xFFFF60-0xFFFF6E | 0xFFFF69      | Output latch / pin  |
 | PCR             | 0xFFFF70-0xFFFF77 | 0xFFFF70      | Port Control        |
 
-### 7. DMA controller needed for keyboard input
-- **Symptom**: CyOS displayed welcome screen but keyboard input had no effect
-- **Root cause**: CyOS reads the keyboard matrix via DMA transfers, not direct CPU reads.
-  The keyboard scan routine sets up DMA channel 0 to transfer from 0xE00000+ (keyboard
-  matrix addresses) to 0xFFDC00 (on-chip RAM), then reads the results from on-chip RAM.
-  Without DMA emulation, the on-chip RAM destination always contained zeros.
-- **Fix**: Implemented DMA controller in AddressBus with channel registers at 0xFFFEE0-0xFFFEFF
-  and control registers at 0xFFFF00-0xFFFF07. DMA transfers execute immediately when the
-  enable bit (DMABCR bit 4/5/6/7 for channels 0/1/2/3) is written with DTE set.
-
-### 8. RTC I2C protocol - first byte always zero
-- **Symptom**: CyOS displayed time as "228.18.1900" (garbage date/time)
-- **Root cause**: Old PCF8593Rtc.java used a custom shift-register I2C state machine.
-  After `processReceivedByte()` switched to SEND mode and called `prepareNextByte()`
-  (which loaded shiftReg with the first data byte), the code did `shiftReg = 0` which
-  overwrote the loaded data. The first byte of every I2C read was always 0x00.
-- **Fix**: Complete rewrite of PCF8593Rtc.java to match MAME pcf8593.cpp exactly.
-  Uses `active` flag, `dataRecv[]` buffer, `bits` counter with `>8` for ACK handling,
-  MSB-first bit operations matching MAME (`0x80 >> bits` for receive, `data[pos] >> (7-bits)`
-  for send). Initializes with system time via `LocalDateTime.now()`.
-
-### 9. RTC SDA idle state broke CyOS boot (CRITICAL)
-- **Symptom**: CyOS got stuck at boot splash (PC=0x4A3C40, halted=true), never
-  reached the Congratulations welcome screen. No I2C transactions attempted.
-- **Root cause**: During the RTC rewrite (bug #8), the SDA output (`inp`) was
-  initialized to 0 (SDA low). The old code had `sdaOut = true` (SDA high/released).
-  In I2C, idle SDA must be HIGH (open-drain with pull-up). With `inp=0`, Port F
-  reads (0xFFFF5E/0xFFFF6E) returned 0x00 instead of 0x40 for bit 6. CyOS reads
-  Port F during early init and the wrong value sent it down a different code path
-  where it never progressed past the boot splash.
-- **Fix**: Three changes to PCF8593Rtc.java:
-  1. Initialize `inp = 1` (SDA released/high when idle, matching I2C spec)
-  2. Set `inp = 0` in RECV mode after processing byte (ACK = pull SDA low)
-  3. Set `inp = 1` to release SDA: at start of each new RECV byte, on STOP
-     condition, and on master NACK in SEND mode
-- **Lesson**: Peripheral idle/default states matter! CyOS checks port pin states
-  during early init, even for peripherals it hasn't communicated with yet. Always
-  match the real hardware's electrical idle state (I2C: SDA and SCL both high).
-  MAME itself has `m_inp = 0` with a FIXME comment saying "sda should default 1
-  not 0" - our old working code got this right with `sdaOut = true`.
-
-### 10. I2C SDA routing differs between XT and V1/V2 (FIXED)
-- **Symptom**: V2 produced zero I2C transactions during boot. XT worked fine.
-- **Root cause**: V1/V2 CyOS uses the open-drain I2C model where SDA is controlled
-  via Port F DDR (0xFFFEBE), not DR (0xFFFF6E). DDR bit 0 = output mode drives SDA
-  low (via DR=0); DDR bit 0 = input mode releases SDA high (via pull-up). XT writes
-  both SCL and SDA to DR in the same byte write. Our code only triggered the RTC
-  from DR writes, so V1/V2 I2C was completely silent.
-- **Fix**: Machine-specific I2C routing in AddressBus.java:
-  - V1/V2: SDA triggered from Port F DDR (0xFFFEBE) writes; SCL from DR (0xFFFF6E)
-  - XT: Both SCL and SDA triggered from Port F DR writes (0xFFFF6E)
-- **Result**: V2 now has full I2C transactions matching the CyOS RTC protocol:
-  boot init reads all 16 registers, writes defaults (control=0x84, time=Jan 1 00:00:00),
-  then starts counting (control=0x04).
-
-### 11. Timer isRunning() snapshot broke Timer8_1 mid-frame start
-- **Symptom**: CyOS stuck at logo screen (boot phase 3). Timer8_0 interrupts fire
-  but CyOS never progresses past the boot splash.
-- **Root cause**: Performance optimization snapshotted `timer8_1.isRunning()` once
-  at the start of each frame (every 307,200 cycles). CyOS starts Timer8_1 mid-frame
-  by writing TCR=0x03. The snapshot was `false` from frame start, so Timer8_1 wasn't
-  ticked for the rest of that frame.
-- **Fix** (first attempt): Removed per-frame snapshot, ticked all timers unconditionally.
-- **Current approach**: Re-introduced per-frame `isRunning()` caching (acceptable since
-  worst case is 1 frame / ~16ms delay for a timer enabled mid-frame). This works because
-  CyOS doesn't rely on Timer8_1 starting within the same frame it's configured - the
-  original bug was from a more aggressive optimization that cached per-cycle, not per-frame.
-- **Lesson**: Per-frame timer caching is safe; per-cycle would be too aggressive.
-
-### 12. Port F input pins missing pull-ups broke V1 SPI flash access
-- **Symptom**: V1 boot ROM stuck in tight loop at PC=0x002BC4, never accessing SPI flash.
-- **Root cause**: V1 boot ROM polls Port F input register (0xFFFF5E) bit 2 waiting for
-  AT45DB041 RDY/BUSY pin to go high (device ready). Our handler only returned the RTC
-  SDA bit (bit 0 for V1, bit 6 for XT), leaving all other bits at 0. On real hardware,
-  unconnected input pins with pull-up resistors read as 1.
-- **Fix**: Changed Port F input (0xFFFF5E) and Port F DR (0xFFFF6E) reads to return 0xFF
-  (all pull-ups high) with the RTC SDA bit conditionally cleared when SDA is low. This
-  correctly models: bit 2 = AT45DB041 RDY (always ready), bit 0/6 = RTC SDA state.
-- **Lesson**: Input port registers should default to pull-up state (0xFF) for unhandled
-  bits, not 0x00. Real hardware has pull-ups on most port pins.
-
-### 13. V1 CyOS stuck waiting for DTC-driven SPI flash transfer
-- **Symptom**: V1 CyOS loaded from SPI flash, displayed dot pattern on LCD, but stuck
-  at PC=0x206B82 polling a flag at 0x21F07A that never became non-zero.
-- **Root cause**: V1 CyOS uses the H8S DTC (Data Transfer Controller) for bulk SPI flash
-  reads. CyOS sets up a DTC register block at 0xFFFBD0 (source=SCI1 RDR, dest=RAM buffer,
-  count=page size), enables DTC via DTCER (0xFFFF34), then sets SCI1 SCR=0x50 (RE+RIE).
-  In real hardware, the SCI in clock-synchronous mode auto-generates clock when RE=1,
-  receiving bytes that trigger RXI interrupts, which the DTC handles automatically. Our
-  emulation had no DTC and no autonomous SCI receive, so no data was ever transferred.
-- **Fix**: Implemented lightweight DTC simulation in AddressBus. When SCI1 SCR is written
-  with RE+RIE (receive mode) or TE+TIE (transmit mode) and DTCER bit 1 is set:
-  1. Reads DTC register block from on-chip RAM at 0xFFFBD0
-  2. MRA=0x20 (receive): calls spiFlash.transfer(0xFF) for each byte, writes to dest
-  3. MRA=0x80 (transmit): reads from source buffer, calls spiFlash.transfer() for each
-  4. Clears DTC count and DTCER, fires SCI1 RXI interrupt (vector 85) for completion
-  This bypasses the need for full DTC emulation or autonomous SCI clock generation.
-- **Lesson**: The H8S DTC is simpler than DMA but still essential for V1 CyOS. It's
-  interrupt-triggered, using register info blocks in on-chip RAM. CyOS's SPI flash driver
-  uses polled SCI for command bytes, then switches to DTC for bulk data transfer.
+### Patterns to Watch For
+- **MOV post-inc/pre-dec aliasing**: When Rs==Rd, must use temp variable (bug #4)
+- **Interrupt flag transitions**: Only fire on 0→1 transition, not every tick (bug #2)
+- **SLEEP wake**: Any interrupt request wakes CPU from sleep regardless of I flag (bug #3)
+- **Input port defaults**: Unhandled input pins should return 0xFF (pull-ups), not 0x00 (bug #12)
+- **Peripheral idle states**: I2C SDA must idle HIGH; CyOS checks pins during early init (bug #9)
+- **I2C routing per machine**: V1/V2 use DDR-based SDA, XT uses DR-based SDA (bug #10)
+- **Timer caching**: Per-frame isRunning() caching is safe; per-cycle is too aggressive (bug #11)
+- **DTC for V1 SPI**: CyOS uses DTC for bulk SPI reads; detect SCR writes + DTCER to trigger (bug #13)
 
 ## Known Issues
 - **Fn+number keys intermittent**: Number keys (Fn+letter combos) work ~80-90% of the
@@ -729,176 +595,13 @@ Supports most H8S instructions used in CyOS: MOV (all addressing modes), ADD/SUB
 AND/OR/XOR, shifts/rotates, branches, JSR/BSR/RTS, bit operations (BSET/BCLR/BTST/BLD/BST
 including memory-addressed variants like `BSET #n, @aa:32`), STM/LDM, EXTU/EXTS, MULXU/DIVXU.
 
-## V2 Investigation: LCD Never Updates After Boot
+## V2 Status
+Full investigation in [docs/v2-investigation.md](docs/v2-investigation.md).
 
-### Summary
-V2 CyOS (cyrom117.bin + cyos_v1358.bin + flash_v1358.bin) boots past the boot ROM
-but the LCD never updates after the initial test pattern. The root cause is that CyOS's
-main UI task blocks reading "cyos.cfg" from the SPI flash (AT45DB041) when the file
-data spans multiple CFS pages. MAME also cannot fully boot V2 CyOS with these ROMs.
-
-### Boot Sequence (V2)
-1. Boot ROM draws gradient test pattern to LCD (frame ~1-45)
-2. Boot ROM loads CyOS from memory-mapped flash at 0x100000
-3. CyOS decompresses, creates 6 tasks, starts RTOS scheduler (frame ~45-60)
-4. DTC+SCI1 reads CFS directory from SPI flash (2,102 DTC transfers during boot)
-5. At frame ~123, timer dispatches event handler task (0x20889E, pri=200) and
-   animation task (0x208706, pri=50) simultaneously
-6. Event handler opens "/default/System.a" (succeeds), then "cyos.cfg"
-7. "cyos.cfg" first ~84 bytes read successfully from pre-loaded CFS page
-8. Next read (4 bytes of second record) **blocks** - continuation page not fetched
-9. Task suspended (pri=0, not re-queued), LCD rendering code at 0x10AEE4 never reached
-
-### V2 CyOS Task Map
-| Task Addr | Base Pri | Handler (vtable[4]) | Role |
-|-----------|----------|---------------------|------|
-| 0x2001C4 | 1 | (idle/SLEEP) | Dispatcher/idle loop |
-| 0x208BA4 | 201 | 0x1256C6 | Semaphore event loop |
-| 0x20889E | 200 | 0x10B1C4 | **Event dispatcher (UI/LCD)** |
-| 0x208706 | 50 | 0x123AB8 | Scrolling/animation |
-| 0x20775E | 5 | 0x119F62 | Periodic housekeeping |
-| 0x20831E | 5 | 0x117EDE | I2C/RTC related |
-
-### V2 RTOS Scheduler (disassembled)
-Task Control Block (partial):
-| Offset | Field | Description |
-|--------|-------|-------------|
-| 44 (0x2C) | state | 0=idle, 1=prepared/ready |
-| 48 (0x30) | accum_time | CPU time consumed |
-| 84 (0x54) | pri84 | Current/effective priority |
-| 85 (0x55) | base_pri | Base priority (restored by prepare_task) |
-| 88 (0x58) | next | Queue link pointer |
-| 92 (0x5C) | saved_sp | Saved stack pointer |
-| 100 (0x64) | queue_ptr | Current wait queue |
-
-Key globals: `0x20022C`=current_task, `0x200230`=ready_queue, `0x200039`=sched_lock
-
-Scheduler functions:
-- `yield(task)` at 0x1067F0: sets pri84=0, calls reschedule
-- `reschedule()` at 0x1068E4: if ready_head.pri >= current.pri → context switch.
-  **Tasks with pri=0 are NOT re-queued** (0x106934: BEQ skips insert_into_queue)
-- `prepare_task(task)` at 0x106874: copies base_pri→pri84, inserts into ready_queue
-- `setup_dispatch(task)` at 0x106C1A: calls 0x107838 + prepare_task + optional reschedule
-
-### The Blocking Chain
-1. Handler 0x10B1C4 calls event_poll (0x10B05E) → blocks until event arrives
-2. Timer dispatches task → event_poll returns 0x0007 (bits 0,1,2 set)
-3. Handler calls 0x10BDE8 (process event, opens "cyos.cfg")
-4. 0x10BDE8 reads file via producer-consumer queue model:
-   - `file_read_bytes(handle, buf, N)` at 0x110248
-   - Calls `semaphore_wait(handle+8, count)` at 0x10FC4E
-   - If queue has data → returns immediately; if empty → blocks task
-5. First CFS page data (pre-loaded during file_open) consumed after ~84 bytes
-6. Next `semaphore_wait` finds empty queue → `set_task_queue` → yield → **suspended**
-7. No mechanism fetches the continuation CFS page → task permanently blocked
-
-### CyOS File I/O Architecture (V2)
-```
-file_open("cyos.cfg")
-  → CFS directory lookup (cached in RAM at 0x20F21C from boot DTC reads)
-  → DTC reads first data page from SPI flash (AT45DB041)
-  → Pre-loads page data into file handle queue at handle+8
-  → Returns handle with ~170 bytes of data ready
-
-file_read_bytes(handle, buf, count)
-  → semaphore_wait(handle+8, count) — blocks if queue empty
-  → dequeue bytes from queue
-  → update file offset at handle+68
-  → if queue exhausted: BLOCKS (continuation page fetch broken)
-```
-
-File handle structure:
-| Offset | Content |
-|--------|---------|
-| 0 | ptr → status struct (bit 0=READY/closed, bit 1=ERROR) |
-| 8 | ptr → semaphore/data queue |
-| 68 | file read position (32-bit) |
-
-### Why Continuation Pages Aren't Fetched
-The CyOS file I/O uses a queue-based producer-consumer model. When the file handle's
-data queue is exhausted, the consumer task blocks on the semaphore waiting for more
-data. A producer (likely a callback or background task) should:
-1. Detect queue underflow
-2. Initiate DTC+SCI1 read of the next CFS page from SPI flash
-3. Enqueue the page data into the file handle's queue
-4. Signal the semaphore to unblock the consumer
-
-This continuation mechanism is not working. Possible causes:
-- The queue underflow callback isn't being triggered
-- The DTC setup for continuation reads uses a different code path than the initial read
-- The background flash driver task (possibly 0x208BA4) is never dispatched to process
-  the I/O request
-- MAME's V2 emulation has the same limitation (hangs at "CyOS loading")
-
-### V2 Timer Queue Architecture (disassembled)
-The queue at 0x200234 is a lightweight TIMER QUEUE separate from the full RTOS task
-scheduler. Timer entry structure (from disassembly of scheduler at 0x1076FA):
-| Offset | Field | Description |
-|--------|-------|-------------|
-| 0x00 | deadline | 32-bit tick count to fire at (compared with 0x20004E) |
-| 0x04 | interval | 32-bit repeat period (re-enqueued after each fire) |
-| 0x08 | one_shot | Byte flag (1=one-shot, 0=repeating) |
-| 0x0C | next | Pointer to next entry in queue |
-| 0x10 | desc_ptr | Callback descriptor pointer → descriptor[0x08] = handler function |
-
-Active timer entries at frame ~1200:
-- `0x208706`: interval=250, handler=0x1239CC (display handler)
-- `0x20775E`: interval=5000, handler=0x106AB2 (idle handler)
-
-### V2 Display Handler Chain (0x1239CC)
-The display handler runs every 250 ticks (~once per 16 frames) and gates rendering
-through a chain of entry flags:
-1. **entry[0x96]** (offset 150): If 0 → calls idle handler (0x106AB2), skips display
-2. **entry[0x9A]** (offset 154): If non-zero → consumer loop (display_update 0x123752)
-3. **entry[0x91]** (offset 145): **If 0 → skips ALL rendering at 0x123C8E**
-
-The display handler also accumulates scroll velocity and increments a counter. After
-256 handler calls, it calls task_resume to wake the display init task (0x123AB8) which
-then enters another 256-call cycle. This takes ~4096 frames per cycle.
-
-### V2 Display Rendering Blocked - Root Cause
-After extensive debugging (V2Debug106-V2Debug118), the full chain was traced:
-1. **entry[0x91] stays 0** — no CyOS code ever sets it because the desktop app never starts
-2. **Desktop app depends on RF service readiness** — RF init never completes without hardware
-3. **RF hardware not emulated** — RF2915 radio SPI commands get no response
-4. **Even forcing entry[0x91]=1** doesn't help — there's no display content registered
-
-The display system itself works correctly (display_update called 594+ times, handler
-fires on schedule), but it has no content to render.
-
-### V2 Code Stub Injection Technique
-Debug scripts use H8S machine code injection to bypass the RF dependency:
-```
-Write stub to RAM after splash (not before — CyOS init overwrites early RAM):
-  STUB_ADDR = 0x23FE00 (near end of external RAM)
-  MOV.L #RF_OBJ, ER0     ; 7A 00 00 20 2C B2
-  JSR @change_state_to_1  ; 5E 10 74 6E
-  JMP @scheduler_return   ; 5A 10 98 DC
-```
-When the scheduler runs (0x1098DC), redirect to stub if RF has pending waiters.
-This successfully wakes the RF task (rfState 0→1, rfWl cleared), but the desktop
-app still doesn't start because it needs more than just RF state=1.
-
-### V2 set_task_state Auto-Resolve Strategy
-The emulator always-resolves non-RF set_task_state calls (not once-per-pair). Services
-like 0x208B84 are polled ~2.3M times during normal boot. The RF object (0x202CB2) is
-blacklisted during boot because resolving it early triggers RF hardware init that
-fails and permanently breaks boot (confirmed by V2Debug114).
-
-### Next Steps to Fix V2
-1. **Implement RF chip SPI stub** — respond with "initialized OK" to RF2915 commands
-2. **Find RF→desktop dependency** — identify which CyOS function starts the desktop app
-   and what conditions it checks beyond RF state=1
-3. **Try different ROMs** — a web-based V2 emulator exists that works with its own ROMs;
-   different CyOS versions may handle RF dependency differently
-4. **Compare with V1** — V1 CyOS file I/O works and has no RF dependency for boot
-5. **Disassemble 0x10FC4E** (semaphore_wait) to understand queue refill for multi-page reads
-
-### MAME V2 Key Source Files
-- `src/mame/cybiko/cybiko.cpp` lines 86-100: V2 memory map
-- `src/mame/cybiko/cybiko_m.cpp` lines 126-132: V2 keyboard quirk (ESC bit OR)
-- `src/devices/machine/at45dbxx.cpp`: AT45DB041 SPI flash protocol (bit-level)
-- `src/tools/imgtool/modules/cybiko.cpp`: V1/V2 CFS format (264-byte pages)
+V2 boots to animated Cybiko logo but stalls — desktop app never starts because RF
+hardware init (RF2915) never completes. The service stub auto-resolves non-RF
+set_task_state calls; RF object (0x202CB2) is blacklisted during boot. MAME also
+cannot fully boot V2 CyOS with these ROMs.
 
 ### V2 CFS Format (differs from XT)
 V1/V2 use 264-byte pages (vs XT's 258-byte):
@@ -908,8 +611,6 @@ V1/V2 use 264-byte pages (vs XT's 258-byte):
 | 4-5 | 2 | Write count |
 | 6-7 | 2 | CRC16 verification |
 | 8-263 | 256 | Block data (same format as XT) |
-
-flash_v1358.bin: 2048 pages × 264 bytes = 540,672 bytes. "cyos.cfg" found at page 287.
 
 ## NVRAM Manager (`manager/` subproject)
 
