@@ -1,5 +1,6 @@
 package com.github.daberkow;
 
+import javax.swing.*;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -484,26 +485,99 @@ public class CybikoEmulator {
             emu.setSpeaker(new SpeakerOutput(config.clockHz));
         }
 
-        // Set up renderer
+        // Set up renderer and run
         if (!headless) {
             SwingRenderer swing = new SwingRenderer(config);
             swing.setBus(emu.getBus());
             emu.setRenderer(swing);
+
+            // Wire menu bar
+            swing.buildMenuBar(
+                // Open NVRAM
+                e -> {
+                    JFileChooser fc = new JFileChooser();
+                    fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                        "NVRAM files", "nvram", "bin", "nv"));
+                    if (fc.showOpenDialog(swing.getFrame()) == JFileChooser.APPROVE_OPTION) {
+                        try {
+                            Path path = fc.getSelectedFile().toPath();
+                            byte[] nvData = Files.readAllBytes(path);
+                            emu.getExternalRam().load(nvData, 0);
+                            emu.setNvramPath(path);
+                            System.out.printf("Loaded NVRAM: %s (%d bytes)%n", path, nvData.length);
+                        } catch (IOException ex) {
+                            JOptionPane.showMessageDialog(swing.getFrame(),
+                                "Error loading NVRAM: " + ex.getMessage(),
+                                "Error", JOptionPane.ERROR_MESSAGE);
+                        }
+                    }
+                },
+                // Save NVRAM As
+                e -> {
+                    JFileChooser fc = new JFileChooser();
+                    fc.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                        "NVRAM files", "nvram", "bin", "nv"));
+                    if (fc.showSaveDialog(swing.getFrame()) == JFileChooser.APPROVE_OPTION) {
+                        try {
+                            Path path = fc.getSelectedFile().toPath();
+                            Files.write(path, emu.getExternalRam().getRawData());
+                            emu.setNvramPath(path);
+                            System.out.printf("Saved NVRAM: %s%n", path);
+                        } catch (IOException ex) {
+                            JOptionPane.showMessageDialog(swing.getFrame(),
+                                "Error saving NVRAM: " + ex.getMessage(),
+                                "Error", JOptionPane.ERROR_MESSAGE);
+                        }
+                    }
+                },
+                // Start/Stop
+                e -> {
+                    if (emu.isRunning()) {
+                        emu.stop();
+                    } else {
+                        emu.start();
+                    }
+                },
+                // Quit
+                e -> {
+                    emu.stop();
+                    emu.saveNvram();
+                    System.exit(0);
+                }
+            );
+
+            // Listen for state changes to update menu
+            emu.setStateListener(running -> swing.updateMenuState(running));
+            swing.updateMenuState(false); // initial state: stopped
+
+            // Save NVRAM on shutdown (JVM exit)
+            if (emu.getNvramPath() != null) {
+                Runtime.getRuntime().addShutdownHook(new Thread(emu::saveNvram));
+            }
+
+            // Auto-start
+            emu.start();
+
+            // Keep main thread alive
+            try {
+                emu.getEmulatorThread().join();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
         } else {
             emu.setRenderer(new ConsoleRenderer());
-        }
 
-        // Save NVRAM on shutdown (JVM exit)
-        if (emu.nvramPath != null) {
-            Runtime.getRuntime().addShutdownHook(new Thread(emu::saveNvram));
-        }
+            // Save NVRAM on shutdown (JVM exit)
+            if (emu.getNvramPath() != null) {
+                Runtime.getRuntime().addShutdownHook(new Thread(emu::saveNvram));
+            }
 
-        emu.start();
-        // Wait for emulator thread to finish (it's a daemon, so JVM can still exit)
-        try {
-            emu.getEmulatorThread().join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            emu.start();
+            try {
+                emu.getEmulatorThread().join();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }
