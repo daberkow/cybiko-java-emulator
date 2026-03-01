@@ -2,6 +2,8 @@ package com.github.daberkow;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.ActionListener;
+import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
 import java.awt.image.BufferedImage;
@@ -39,6 +41,12 @@ public class SwingRenderer implements FrameBufferRenderer {
     private final int[] heldFramesLeft = new int[MAX_HELD_KEYS];
     private final boolean[] heldReleasePending = new boolean[MAX_HELD_KEYS];
     private int heldCount = 0;
+
+    // Menu bar
+    private JMenuBar menuBar;
+    private JMenuItem openNvramItem;
+    private JMenuItem saveNvramAsItem;
+    private JMenuItem startStopItem;
 
     public SwingRenderer(MachineConfig config) {
         this.config = config;
@@ -83,6 +91,52 @@ public class SwingRenderer implements FrameBufferRenderer {
     }
 
     public void setBus(AddressBus bus) { this.bus = bus; }
+
+    public void buildMenuBar(ActionListener onOpenNvram, ActionListener onSaveNvramAs,
+                             ActionListener onStartStop, ActionListener onQuit) {
+        menuBar = new JMenuBar();
+
+        JMenu fileMenu = new JMenu("File");
+        fileMenu.setMnemonic('F');
+
+        openNvramItem = new JMenuItem("Open NVRAM...");
+        openNvramItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_O,
+            Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()));
+        openNvramItem.addActionListener(onOpenNvram);
+        fileMenu.add(openNvramItem);
+
+        saveNvramAsItem = new JMenuItem("Save NVRAM As...");
+        saveNvramAsItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_S,
+            Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | InputEvent.SHIFT_DOWN_MASK));
+        saveNvramAsItem.addActionListener(onSaveNvramAs);
+        fileMenu.add(saveNvramAsItem);
+
+        fileMenu.addSeparator();
+
+        JMenuItem quitItem = new JMenuItem("Quit");
+        quitItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_Q,
+            Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()));
+        quitItem.addActionListener(onQuit);
+        fileMenu.add(quitItem);
+
+        JMenu emuMenu = new JMenu("Emulator");
+        emuMenu.setMnemonic('E');
+
+        startStopItem = new JMenuItem("Start");
+        startStopItem.addActionListener(onStartStop);
+        emuMenu.add(startStopItem);
+
+        menuBar.add(fileMenu);
+        menuBar.add(emuMenu);
+        frame.setJMenuBar(menuBar);
+        frame.pack();
+    }
+
+    public void updateMenuState(boolean emulatorRunning) {
+        openNvramItem.setEnabled(!emulatorRunning);
+        saveNvramAsItem.setEnabled(emulatorRunning);
+        startStopItem.setText(emulatorRunning ? "Stop" : "Start");
+    }
 
     private void handleKey(int keyCode, boolean pressed) {
         if (bus == null) return;
