@@ -56,6 +56,7 @@ public class CybikoEmulator {
     private final boolean v2ServiceStub;
 
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60;
+    private static final int AUTOSAVE_INTERVAL_FRAMES = 60 * 300; // 5 minutes at 60fps
 
     public CybikoEmulator(MachineConfig config) {
         this.config = config;
@@ -268,6 +269,11 @@ public class CybikoEmulator {
             }
 
             frameCounter++;
+
+            // Auto-save NVRAM every 5 minutes
+            if (nvramPath != null && frameCounter % AUTOSAVE_INTERVAL_FRAMES == 0) {
+                saveNvram();
+            }
 
             // Track frame work time
             frameTotalNanos += System.nanoTime() - frameStartNanos;
