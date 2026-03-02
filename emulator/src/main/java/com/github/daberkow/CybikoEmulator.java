@@ -245,6 +245,13 @@ public class CybikoEmulator {
                             && radio.getTransport() != null && frameCounter >= 1200;
                     boolean nonRfAllowed = !isRf && frameCounter >= 1200;
                     boolean isLate = rfAllowed || nonRfAllowed;
+                    // Debug: log only actual state changes
+                    if (currentByte != expectedByte) {
+                        boolean resolved = isBase || isLate;
+                        System.err.printf("[V2-SVC] frame=%d obj=0x%06X 0x%02X->0x%02X %s%n",
+                            frameCounter, obj, currentByte, expectedByte,
+                            resolved ? "RESOLVED" : (isRf ? "RF-BLOCKED" : "BLOCKED"));
+                    }
                     if ((isBase || isLate) && currentByte != expectedByte) {
                         bus.write8(obj + V2_STATE_OFFSET, expectedByte);
                         cpu.setCCR(cpu.getCCR() & ~0x80);
@@ -281,6 +288,18 @@ public class CybikoEmulator {
 
             frameCounter++;
 
+            // RAM dump feature: -Dcybiko.ramdump=/path writes external RAM at frame 300
+            String ramdumpPath = System.getProperty("cybiko.ramdump");
+            if (ramdumpPath != null && frameCounter == 300) {
+                try {
+                    Files.write(Path.of(ramdumpPath), externalRam.getRawData());
+                    System.err.printf("[RAMDUMP] Wrote %d bytes to %s at frame %d%n",
+                        externalRam.getRawData().length, ramdumpPath, frameCounter);
+                } catch (IOException e) {
+                    System.err.printf("[RAMDUMP] Failed: %s%n", e.getMessage());
+                }
+            }
+
             // Auto-save NVRAM every 5 minutes
             if (nvramPath != null && frameCounter % AUTOSAVE_INTERVAL_FRAMES == 0) {
                 saveNvram();
@@ -310,6 +329,20 @@ public class CybikoEmulator {
                     for (int b : bus.getSci0TdrLog()) hex.append(String.format("%02X ", b));
                     System.err.println(hex);
                     bus.getSci0TdrLog().clear();
+                }
+                if (!bus.getSci0RegLog().isEmpty()) {
+                    System.err.println("[SCI0-REG] " + String.join(" | ", bus.getSci0RegLog()));
+                    bus.getSci0RegLog().clear();
+                }
+                if (!bus.getSci2TdrLog().isEmpty()) {
+                    StringBuilder hex = new StringBuilder("[SCI2-TX] ");
+                    for (int b : bus.getSci2TdrLog()) hex.append(String.format("%02X ", b));
+                    System.err.println(hex);
+                    bus.getSci2TdrLog().clear();
+                }
+                if (!bus.getSci2RegLog().isEmpty()) {
+                    System.err.println("[SCI2-REG] " + String.join(" | ", bus.getSci2RegLog()));
+                    bus.getSci2RegLog().clear();
                 }
             }
 

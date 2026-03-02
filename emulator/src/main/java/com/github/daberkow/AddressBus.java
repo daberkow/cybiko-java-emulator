@@ -49,9 +49,21 @@ public class AddressBus {
     // Serial output buffers (one per SCI channel)
     private final StringBuilder[] sciOutput = {new StringBuilder(), new StringBuilder(), new StringBuilder()};
 
-    // SCI0 TDR raw hex log for radio protocol analysis
+    // SCI TDR raw hex logs for radio protocol analysis
     private final List<Integer> sci0TdrLog = new ArrayList<>();
     public List<Integer> getSci0TdrLog() { return sci0TdrLog; }
+    private final List<Integer> sci2TdrLog = new ArrayList<>();
+    public List<Integer> getSci2TdrLog() { return sci2TdrLog; }
+
+    // SCI0 register access log (captures ALL SCI0 interactions: config + data)
+    private final List<String> sci0RegLog = new ArrayList<>();
+    public List<String> getSci0RegLog() { return sci0RegLog; }
+    // SCI2 register access log
+    private final List<String> sci2RegLog = new ArrayList<>();
+    public List<String> getSci2RegLog() { return sci2RegLog; }
+    private static final String[] SCI_REG_NAMES = {"SMR", "BRR", "SCR", "TDR", "SSR", "RDR", "SCMR"};
+    private int sci0SsrLastLogPc = -1; // deduplicate SSR poll logging
+    private int sci2SsrLastLogPc = -1;
 
     // Speaker state - Port 1 bit 3 (TIOCB1) drives the speaker
     private int speakerLevel = 0;
@@ -75,8 +87,9 @@ public class AddressBus {
     private int sci1Rdr = 0;       // SCI1 receive data register (byte from SPI flash)
     private boolean sci1Rdrf = false; // SCI1 receive data register full
 
-    // Radio co-processor (AVR AT90S2313) connected via SCI0
+    // Radio co-processor (AVR AT90S2313) connected via SCI0 (V1/V2) or SCI2 (XT)
     private RadioCoProcessor radio;
+    private int radioSciChannel = 0; // Which SCI channel the radio is on
     private int sci0Rdr = 0;       // SCI0 receive data register (byte from radio)
     private boolean sci0Rdrf = false; // SCI0 receive data register full
 
@@ -109,7 +122,11 @@ public class AddressBus {
     public void setTimer8_1(H8STimer8 timer) { this.timer8_1 = timer; }
     public void setTimer16(int ch, H8STimer16 timer) { timer16[ch] = timer; }
     public void setSpiFlash(AT45DB041Flash flash) { this.spiFlash = flash; }
-    public void setRadio(RadioCoProcessor radio) { this.radio = radio; }
+    public void setRadio(RadioCoProcessor radio) {
+        this.radio = radio;
+        // XT uses SCI2 for radio, V1/V2 use SCI0
+        this.radioSciChannel = (config.type == MachineConfig.MachineType.XT) ? 2 : 0;
+    }
 
     /**
      * Tick deferred DTC completion. Call from main loop after each cpu.step().
@@ -404,6 +421,13 @@ public class AddressBus {
         if (address == 0xFFFF7C) { // SCI0 SSR
             int ssr = SSR_TDRE | SSR_TEND;
             if (radio != null && sci0Rdrf) ssr |= SSR_RDRF;
+            if (sci0RegLog.size() < 500) {
+                int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+                if (pc != sci0SsrLastLogPc) { // deduplicate tight polling loops
+                    sci0RegLog.add(String.format("R SSR=0x%02X PC=0x%06X", ssr, pc));
+                    sci0SsrLastLogPc = pc;
+                }
+            }
             return ssr;
         }
         if (address == 0xFFFF84) {
@@ -414,6 +438,10 @@ public class AddressBus {
             return SSR_TDRE | SSR_TEND;
         }
         if (address == 0xFFFF7D && radio != null) { // SCI0 RDR
+            if (sci0RegLog.size() < 500) {
+                int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+                sci0RegLog.add(String.format("R RDR=0x%02X PC=0x%06X", sci0Rdr, pc));
+            }
             sci0Rdrf = false;
             return sci0Rdr;
         }
@@ -425,7 +453,26 @@ public class AddressBus {
             }
             return 0;
         }
-        if (address == 0xFFFF8C) return SSR_TDRE | SSR_TEND; // SCI2 SSR
+        if (address == 0xFFFF8D && radio != null && radioSciChannel == 2) { // SCI2 RDR
+            if (sci2RegLog.size() < 500) {
+                int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+                sci2RegLog.add(String.format("R RDR=0x%02X PC=0x%06X", sci0Rdr, pc));
+            }
+            sci0Rdrf = false;
+            return sci0Rdr;
+        }
+        if (address == 0xFFFF8C) { // SCI2 SSR
+            int ssr = SSR_TDRE | SSR_TEND;
+            if (radio != null && radioSciChannel == 2 && sci0Rdrf) ssr |= SSR_RDRF;
+            if (sci2RegLog.size() < 500) {
+                int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+                if (pc != sci2SsrLastLogPc) {
+                    sci2RegLog.add(String.format("R SSR=0x%02X PC=0x%06X", ssr, pc));
+                    sci2SsrLastLogPc = pc;
+                }
+            }
+            return ssr;
+        }
 
         // ICR registers (V1/V2 only, H8S/2245 interrupt controller)
         if (config.type != MachineConfig.MachineType.XT
@@ -566,13 +613,25 @@ public class AddressBus {
             } else {
                 channel = 0; reg = address - 0xFFFF78;
             }
+            // Log SCI0 and SCI2 register writes for radio protocol analysis
+            if ((channel == 0 || channel == 2) && sci0RegLog.size() < 500) {
+                List<String> log = (channel == 0) ? sci0RegLog : sci2RegLog;
+                if (log.size() < 500) {
+                    String regName = (reg < SCI_REG_NAMES.length) ? SCI_REG_NAMES[reg] : "?"+reg;
+                    int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+                    log.add(String.format("W %s=0x%02X PC=0x%06X", regName, value & 0xFF, pc));
+                }
+            }
             if (reg == 3) { // TDR - Transmit Data Register
                 char c = (char)(value & 0x7F);
                 sciOutput[channel].append(c >= 0x20 ? c : (c == '\n' ? '\n' : '.'));
                 if (channel == 0) {
                     sci0TdrLog.add(value & 0xFF);
                 }
-                if (channel == 0 && radio != null) {
+                if (channel == 2) {
+                    sci2TdrLog.add(value & 0xFF);
+                }
+                if (channel == radioSciChannel && radio != null) {
                     int response = radio.transfer(value & 0xFF);
                     if (response >= 0) {
                         sci0Rdr = response;
