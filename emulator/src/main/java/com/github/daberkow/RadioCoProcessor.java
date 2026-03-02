@@ -29,6 +29,13 @@ public class RadioCoProcessor {
     private final int[] cmdBuffer = new int[3];
     private int cmdPos = 0;
 
+    // Network transport layer (optional, null if no networking)
+    private RadioTransport transport;
+
+    // Queue of frames received from the transport layer, waiting to be
+    // delivered to the H8S CPU via the SCI0 protocol.
+    private final Queue<byte[]> receivedFrames = new ArrayDeque<>();
+
     /**
      * Full-duplex byte transfer. Called when the H8S writes to SCI0 TDR.
      *
@@ -74,6 +81,53 @@ public class RadioCoProcessor {
     }
 
     /**
+     * Set the network transport layer for sending and receiving radio packets.
+     *
+     * Wires the transport's packet listener so that incoming packets are
+     * queued for delivery to the H8S CPU. Pass {@code null} to disconnect.
+     *
+     * @param transport the transport to use, or null to disable networking
+     */
+    public void setTransport(RadioTransport transport) {
+        this.transport = transport;
+        if (transport != null) {
+            transport.setPacketListener((data, channel, senderId) ->
+                queueReceivedFrame(data));
+        }
+    }
+
+    /** Returns the currently attached transport, or null if none. */
+    public RadioTransport getTransport() {
+        return transport;
+    }
+
+    /**
+     * Queue a received frame for delivery to the H8S CPU.
+     *
+     * Called by the transport listener when a packet arrives from the network.
+     * The frame will be delivered to the CPU the next time it polls for data.
+     *
+     * @param data raw frame bytes received from the network
+     */
+    public void queueReceivedFrame(byte[] data) {
+        receivedFrames.add(data);
+    }
+
+    /**
+     * Transmit a frame over the network transport.
+     *
+     * Called when the H8S CPU has assembled a complete outgoing frame.
+     * If no transport is attached, the frame is silently dropped.
+     *
+     * @param data raw frame bytes to transmit
+     */
+    public void handleTransmit(byte[] data) {
+        if (transport != null) {
+            transport.sendPacket(data, currentChannel);
+        }
+    }
+
+    /**
      * Process a complete 3-byte command and queue the appropriate response.
      *
      * @param header first byte (0x01 for standard commands, 0x30 for polling)
@@ -91,6 +145,9 @@ public class RadioCoProcessor {
                 case 0x02 -> {
                     // Channel/config command (shared V1 + V2)
                     currentChannel = param;
+                    if (transport != null) {
+                        transport.setChannel(param);
+                    }
                     rxQueue.add(0x00); // ACK
                     initialized = true;
                 }
