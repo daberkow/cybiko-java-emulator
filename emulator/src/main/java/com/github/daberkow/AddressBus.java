@@ -75,6 +75,11 @@ public class AddressBus {
     private int sci1Rdr = 0;       // SCI1 receive data register (byte from SPI flash)
     private boolean sci1Rdrf = false; // SCI1 receive data register full
 
+    // Radio co-processor (AVR AT90S2313) connected via SCI0
+    private RadioCoProcessor radio;
+    private int sci0Rdr = 0;       // SCI0 receive data register (byte from radio)
+    private boolean sci0Rdrf = false; // SCI0 receive data register full
+
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
     // typically re-enabled interrupts. Our synchronous DTC fires during the SCR write (while
@@ -104,6 +109,7 @@ public class AddressBus {
     public void setTimer8_1(H8STimer8 timer) { this.timer8_1 = timer; }
     public void setTimer16(int ch, H8STimer16 timer) { timer16[ch] = timer; }
     public void setSpiFlash(AT45DB041Flash flash) { this.spiFlash = flash; }
+    public void setRadio(RadioCoProcessor radio) { this.radio = radio; }
 
     /**
      * Tick deferred DTC completion. Call from main loop after each cpu.step().
@@ -395,13 +401,21 @@ public class AddressBus {
         if (address == 0xFFFF2F) return isr;
 
         // SCI SSR registers
-        if (address == 0xFFFF7C) return SSR_TDRE | SSR_TEND; // SCI0 SSR
+        if (address == 0xFFFF7C) { // SCI0 SSR
+            int ssr = SSR_TDRE | SSR_TEND;
+            if (radio != null && sci0Rdrf) ssr |= SSR_RDRF;
+            return ssr;
+        }
         if (address == 0xFFFF84) {
             // SCI1 SSR - V1 needs RDRF when SPI flash has data
             if (spiFlash != null) {
                 return SSR_TDRE | SSR_TEND | (sci1Rdrf ? SSR_RDRF : 0);
             }
             return SSR_TDRE | SSR_TEND;
+        }
+        if (address == 0xFFFF7D && radio != null) { // SCI0 RDR
+            sci0Rdrf = false;
+            return sci0Rdr;
         }
         if (address == 0xFFFF85) {
             // SCI1 RDR - V1 reads SPI flash response
@@ -557,6 +571,16 @@ public class AddressBus {
                 sciOutput[channel].append(c >= 0x20 ? c : (c == '\n' ? '\n' : '.'));
                 if (channel == 0) {
                     sci0TdrLog.add(value & 0xFF);
+                }
+                if (channel == 0 && radio != null) {
+                    int response = radio.transfer(value & 0xFF);
+                    if (response >= 0) {
+                        sci0Rdr = response;
+                        sci0Rdrf = true;
+                    } else if (radio.hasData()) {
+                        sci0Rdr = radio.read();
+                        sci0Rdrf = true;
+                    }
                 }
                 // V1: SCI1 TDR writes go to SPI flash
                 if (channel == 1 && spiFlash != null) {
