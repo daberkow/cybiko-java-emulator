@@ -279,6 +279,9 @@ public class CybikoEmulator {
             // Tick the RTC once per frame
             bus.tickRtc();
 
+            // Tick radio co-processor (heartbeat beacons)
+            if (radio != null) radio.tick();
+
             // Print serial output from boot loader / CyOS
             for (int sci = 0; sci < 3; sci++) {
                 String s = bus.drainSerialOutput(sci);

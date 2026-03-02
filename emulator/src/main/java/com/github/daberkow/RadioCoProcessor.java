@@ -36,6 +36,10 @@ public class RadioCoProcessor {
     // delivered to the H8S CPU via the SCI0 protocol.
     private final Queue<byte[]> receivedFrames = new ArrayDeque<>();
 
+    // Heartbeat beacon for peer discovery
+    private int heartbeatCounter = 0;
+    private static final int HEARTBEAT_INTERVAL = 300; // frames (5 sec at 60fps)
+
     /**
      * Full-duplex byte transfer. Called when the H8S writes to SCI0 TDR.
      *
@@ -128,6 +132,36 @@ public class RadioCoProcessor {
         if (transport != null) {
             transport.sendPacket(data, currentChannel);
         }
+    }
+
+    /**
+     * Tick once per frame. Sends periodic heartbeat beacons for peer discovery.
+     * Call from the emulator's per-frame code (after rendering, before sleep).
+     */
+    public void tick() {
+        if (transport == null || !initialized) return;
+        heartbeatCounter++;
+        if (heartbeatCounter >= HEARTBEAT_INTERVAL) {
+            heartbeatCounter = 0;
+            sendHeartbeat();
+        }
+    }
+
+    /**
+     * Send a heartbeat beacon over the transport. The beacon contains the
+     * device ID so other emulators can discover this device.
+     */
+    private void sendHeartbeat() {
+        // Minimal beacon: 1-byte type (0x01 = heartbeat) + 4-byte device ID
+        int devId = transport.getDeviceId();
+        byte[] beacon = new byte[] {
+            0x01,  // beacon type
+            (byte)((devId >> 24) & 0xFF),
+            (byte)((devId >> 16) & 0xFF),
+            (byte)((devId >> 8) & 0xFF),
+            (byte)(devId & 0xFF)
+        };
+        transport.sendPacket(beacon, currentChannel);
     }
 
     /**
