@@ -175,9 +175,15 @@ The H8S communicates with the AVR over **SCI channel 0** (SCI0) at **53,333 baud
 
 | SCI Channel | V1/V2 Connection | XT Connection |
 |-------------|-------------------|---------------|
-| SCI0 | AVR radio (53.3 KBaud) [^3] | AVR radio (53.3 KBaud) [^3] |
+| SCI0 | AVR radio (53.3 KBaud) [^3] | Not used for radio |
 | SCI1 | AT45DB041 SPI flash [^9] | Not connected (memory-mapped flash) |
-| SCI2 | Debug serial (57600) [^10] | Debug serial (57600) [^10] |
+| SCI2 | Debug serial (57600) [^10] | AVR radio (polled I/O at boot, TXI2-driven for features) |
+
+**Key discovery:** XT CyOS v1508 uses **SCI2** for radio communication, not SCI0. The
+channel init command (`01 02 02`) is sent via SCI2 (0xFFFF88–0xFFFF8E) during boot
+using polled I/O (SCR=0x70 = RIE+TE+RE). When a radio feature is opened, CyOS is
+expected to switch to interrupt-driven mode with TIE enabled (SCR bit 7) and TXI2
+(vector 90) driving the state machine. V1/V2 continue to use SCI0 with polled I/O.
 
 ### MAME Has No SCI0 Wiring
 
@@ -197,6 +203,91 @@ m_maincpu->write_sci_tx<2>().set(m_debug_serial, FUNC(rs232_port_device::write_t
 This means **MAME has zero radio emulation**. CyOS writes to SCI0 TDR are silently
 dropped. CyOS reads from SCI0 RDR return nothing. This directly causes V2 CyOS to
 stall at boot [^11].
+
+## XT SCI2 Interrupt-Driven Radio Protocol
+
+### SCI2 Register Map (XT)
+
+| Address | Register | Description |
+|---------|----------|-------------|
+| 0xFFFF88 | SMR2 | Serial Mode Register (async, 8N1) |
+| 0xFFFF89 | BRR2 | Bit Rate Register |
+| 0xFFFF8A | SCR2 | Serial Control Register |
+| 0xFFFF8B | TDR2 | Transmit Data Register |
+| 0xFFFF8C | SSR2 | Serial Status Register |
+| 0xFFFF8D | RDR2 | Receive Data Register |
+| 0xFFFF8E | SCMR2 | Smart Card Mode Register |
+
+### SCI2 Interrupt Vectors (from MAME swx00.cpp)
+
+| Vector | Name | Description |
+|--------|------|-------------|
+| 88 | ERI2 | SCI2 Receive Error |
+| 89 | RXI2 | SCI2 Receive Data Register Full |
+| 90 | TXI2 | SCI2 Transmit Data Register Empty |
+| 91 | TEI2 | SCI2 Transmit End |
+
+### Boot-Time Polled I/O Sequence
+
+During boot (~frame 240), CyOS initializes SCI2 and sends the channel config command
+using polled I/O (no interrupts):
+
+```
+W SMR=0x00   — async 8N1
+W BRR=0x0F   — baud rate
+W SCR=0x70   — RIE(6)+TE(5)+RE(4), no TIE(7)
+W TDR=0x01   — command header byte
+R SSR=0x44   — check TDRE (bit 7 clear = busy, RDRF set from response)
+W SSR=0x44   — clear RDRF flag
+W TDR=0x02   — command byte (set channel)
+W TDR=0x02   — param byte (channel 2)
+R SSR=0xC4   — RDRF=1, read final response
+W SCR=0x00   — disable SCI2
+```
+
+### TDRE State Modeling
+
+The emulator models SCI2 TDRE (Transmit Data Register Empty) to support both
+polled and interrupt-driven modes:
+
+1. **TDRE starts high** (TDR is empty and ready for data)
+2. **TDR write clears TDRE** (byte is "transmitting")
+3. **After ~32 CPU cycles, TDRE goes high** (byte transmitted)
+4. **If TIE is set in SCR, TXI2 (vector 90) fires** when TDRE restores
+
+This cycle allows CyOS's TXI2 interrupt handler to send one byte per invocation,
+read the response from RDR, and advance the radio protocol state machine.
+
+### Per-Byte Response Model
+
+Every TDR write generates a response byte (full-duplex SPI-like behavior):
+
+| Byte position in command | Response |
+|--------------------------|----------|
+| Byte 1 (header) | 0xFF (idle) |
+| Byte 2 (command) | 0xFF (idle) |
+| Byte 3 (param) | Command-specific response |
+
+Command responses (on 3rd byte):
+- `01 04 00` (init): 0x00 (ACK)
+- `01 02 NN` (set channel): 0x00 (ACK)
+- `01 03 00` (V1 init): 0x00 (ACK)
+- `30 XX XX` (poll): 0xC8 (no data) or 0x32 (data available)
+
+### DTC Bulk Transfer (DTCERF at 0xFFFF35)
+
+CyOS uses DTC for bulk radio packet TX/RX on SCI2:
+
+| Bit | Source | Description |
+|-----|--------|-------------|
+| 7 | ERI2 | SCI2 Receive Error |
+| 6 | RXI2 | SCI2 Receive Data Register Full |
+| 5 | TXI2 | SCI2 Transmit Data Register Empty |
+| 4 | TEI2 | SCI2 Transmit End |
+
+DTC register info blocks in on-chip RAM:
+- RX block at 0xFFFBE8: source=0xFFFF8D (SCI2 RDR), dest=RAM buffer
+- TX block at 0xFFFBF4: source=RAM buffer, dest=0xFFFF8B (SCI2 TDR)
 
 ## CyOS Radio Protocol (CYRF / CyDP)
 
@@ -389,15 +480,48 @@ is logged. The emulator currently provides no SCI0 RDR response (SSR always retu
 #### XT (CyOS v1508) — No SCI0 Traffic
 
 ```
-(silence — zero bytes written to SCI0 TDR during 30+ seconds of headless boot)
+(silence — zero SCI0 register accesses of any kind during 100+ seconds of emulation)
 ```
 
-XT CyOS v1508 does **not** write to SCI0 at any point during boot, even after
-reaching the "Congratulations" welcome screen or the desktop home screen (with
-NVRAM). The XT's radio driver either:
-- Uses a completely different communication mechanism, or
-- Does not attempt radio init until explicitly triggered by user action, or
-- Has been removed/disabled in v1508 (a late Xtreme-specific firmware)
+XT CyOS v1508 does **not** access any SCI0 register at any point during boot or
+idle operation. Extended testing (6120 frames, ~100 seconds) with comprehensive
+register logging (reads of SSR/RDR, writes to SMR/BRR/SCR/TDR) confirmed zero
+SCI0 activity in both states:
+- Fresh boot → "Congratulations" welcome screen (VRAM hash FAEDD600)
+- Completed setup → Home screen with clock (VRAM hashes 6C55765A / B5EB2FA8)
+
+**Root cause analysis (from CyOS decompression and string analysis):**
+
+CyOS v1508 **does** contain radio driver code. Evidence from the decompressed CyOS
+image at 0x4A3BF8+:
+- String `"rfdriver"` at 0x483146 — radio driver service name
+- String `"rcvr enable"` at 0x4823C5 — receiver enable function
+- String `"Multi Channel Protocol..."` at 0x4831AC — protocol layer
+- String `"My CyID is %ld 0x%08lX @%s"` at 0x4808C2 — device ID display
+- String `"current channel %d"` at 0x480913 — channel management
+- SCI0 TDR write (`@0xFFFF7B`) and RDR read (`@0xFFFF7D`) present in CyOS I/O
+  dispatch tables at 0x4B4CF4 and 0x4B4A7A respectively
+
+However, radio is gated behind a **parental permission** system:
+- `"Communications are OFF on your Cybiko computer. You are not able to use Chat,
+  Friend Finder, E-mail and play multi-player games."` at 0x4FFC5F
+- `"If you want to be able to communicate wirelessly, call your parent."` at 0x4FFB55
+- `"Message for parent. Your permission to use RF communication is required (now
+  the communication is disabled)."` at 0x4FFC92
+
+The `settings.dat` file in CFS (file ID 2) stores ~14KB of settings data. Three
+bytes differ between fresh boot and completed setup:
+- Byte 12: 0x00 → 0x01 (first-boot wizard completed flag)
+- Byte 13: 0x01 → 0x00 (inverse of byte 12)
+- Byte 41: 0x00 → 0x01 (possibly wireless permission, but setting it to 1 via
+  the Congratulations flow does not trigger SCI0 activity)
+
+**Conclusion:** XT CyOS v1508 defers all SCI0/radio initialization until the user
+actively triggers a radio feature (Chat, Friend Finder, E-mail, multiplayer games)
+through the UI. Idle operation — including the home screen — never touches SCI0.
+This is a significant behavioral difference from V1/V2, which init SCI0 during
+early boot. To capture XT SCI0 traffic, the emulator must run with a GUI and the
+user must navigate to a radio feature.
 
 This explains why XT boots successfully without any radio emulation [^11].
 
@@ -544,9 +668,9 @@ Based on the captured protocol data:
    The AVR lock bits were likely set to prevent readout.
 
 3. ~~**V2 vs XT Boot Dependency** — V2 CyOS blocks on RF init; XT boots without it.~~
-   **Resolved** — XT CyOS v1508 does not write to SCI0 at all during boot. V1 CyOS
-   v1246 writes init commands but does not block on responses. V2 CyOS (all versions)
-   writes init commands and blocks waiting for responses.
+   **Resolved** — XT CyOS v1508 does not access SCI0 at all during boot or idle
+   operation. V1 CyOS v1246 writes init commands but does not block on responses.
+   V2 CyOS (all versions) writes init commands and blocks waiting for responses.
 
 4. **Channel Selection Algorithm** — How CyOS picks channels (fixed assignment?
    frequency hopping?) is unknown [^4].
@@ -559,6 +683,13 @@ Based on the captured protocol data:
 
 7. **Response Format** — What bytes should the RadioCoProcessor return on SCI0 RDR
    after receiving each init command? Requires disassembly of the radio driver.
+
+8. **XT Radio Trigger** — XT v1508 defers radio init until a user-facing radio
+   feature is opened (Chat, Friend Finder, E-mail, multiplayer). The exact trigger
+   mechanism is unknown. To capture XT SCI0 traffic, the emulator needs GUI
+   interaction — headless mode cannot trigger radio features. The parental
+   permission dialog may also need to be bypassed (modify `settings.dat` byte 12
+   or navigate through the first-boot wizard with GUI).
 
 ## What Would Unlock Progress
 
@@ -573,6 +704,12 @@ Based on the captured protocol data:
 - ~~**Different V2 ROM versions** (v1355, v1357, v1358) — some may be less aggressive
   about blocking boot on RF readiness~~ — **tested**: all three block, v1355 most
   verbose (periodic polling), v1357 most aggressive (stalls on first command)
+- **GUI-based XT SCI0 capture** — run the emulator with GUI, navigate to Chat or
+  Friend Finder, and check if CyOS v1508 finally initializes SCI0. The emulator
+  now has comprehensive SCI0 register logging (`[SCI0-REG]` in stderr) that will
+  capture any register access including SMR/BRR/SCR configuration writes.
+  Use `-Dcybiko.ramdump=/path` with `JAVA_TOOL_OPTIONS` to dump external RAM at
+  frame 300 for CyOS disassembly.
 
 ---
 

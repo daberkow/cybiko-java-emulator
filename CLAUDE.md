@@ -73,6 +73,17 @@ App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice
 ./gradlew run --args="--machine v2 <bootrom> <flash> --radio lan"
 ```
 
+### Debug Features
+```bash
+# RAM dump: writes entire external RAM at frame 300 (after CyOS decompression)
+JAVA_TOOL_OPTIONS="-Dcybiko.ramdump=/tmp/cyos_ram.bin" ./gradlew :emulator:run --args="..."
+
+# SCI register logging: prints [SCI0-REG] and [SCI2-REG] lines to stderr showing
+# all SCI0/SCI2 register reads/writes with PC addresses (radio protocol analysis)
+# Also prints [SCI0-TX] and [SCI2-TX] hex dump of TDR bytes every ~2 seconds
+# Both are automatic — no flags needed
+```
+
 ## Hardware Reference
 
 ### Supported Machines
@@ -183,10 +194,13 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
   MachineConfig to select XT (15-col, Fn+letter numbers) or V1 (9-col, dedicated numbers)
   keyboard layout. Queue-based Fn+letter injection for XT number keys. Minimum key hold
   time (3 frames) for all keys.
-- `RadioCoProcessor` - AVR radio co-processor stub (AT90S2313). Emulates SCI0 UART
+- `RadioCoProcessor` - AVR radio co-processor stub (AT90S2313). Emulates SCI UART
   protocol with the H8S CPU. 3-byte command protocol (header + cmd + param), responds
-  with ACKs. Tracks initialization state and current radio channel. Connected via
-  AddressBus SCI0 registers (0xFFFF78-0xFFFF7E).
+  with ACKs. Per-byte full-duplex responses (0xFF for intermediate bytes, command
+  response on 3rd byte). Tracks initialization state and current radio channel.
+  Heartbeat beacon every 5 seconds for peer discovery. Connected via SCI0
+  (V1/V2, 0xFFFF78-0xFFFF7E) or SCI2 (XT, 0xFFFF88-0xFFFF8E) with interrupt-driven
+  TXI2 (vector 90) support. DTC bulk transfer for packet TX/RX via DTCERF (0xFFFF35).
 - `RadioTransport` - Interface for radio network layer. Implementations:
   `UdpMulticastTransport` (LAN via multicast 239.0.0.42:19200),
   `SdrTransport` (TCP bridge to GNU Radio on localhost:19201).
@@ -345,6 +359,15 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   bypass startup waits. The RF object (0x202CB2) must never be resolved via stub —
   causes failed HW init. See V2 Investigation below. MAME also cannot fully boot V2
   CyOS with these ROMs.
+- **XT radio partially working**: CyOS v1508 uses SCI2 (not SCI0) for radio. During
+  boot, CyOS sends channel init command (`01 02 02`) via polled I/O on SCI2 (SCR=0x70).
+  Full radio features (Chat, Friend Finder, E-mail, multiplayer) are deferred until the
+  user opens them via the GUI. When activated, CyOS enables TXI2 interrupts (SCR bit 7)
+  to drive the radio state machine. SCI2 TDRE modeling, TXI2 (vector 90) interrupt
+  generation, per-byte responses, and DTC bulk transfer are all implemented and ready.
+  Heartbeat beacons broadcast every 5 seconds via UDP multicast. The poll cycle
+  (repeating 0x30 commands) and peer discovery require GUI interaction to trigger.
+  Parental permission system may also gate radio access.
 
 ## Current Status
 - Multi-machine support: V1 (Classic), V2, and XT (Xtreme) selectable via --machine flag
@@ -362,7 +385,11 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - VRAM CRC32 hash and frame timing in STATUS log
 - Frame time ~4ms (24% of 16.7ms budget), JIT-optimized after first second
 - No unimplemented opcodes in the current execution path
-- Radio co-processor stub handles SCI0 UART protocol (V1/V2 init commands)
+- Radio co-processor stub handles SCI0 (V1/V2) and SCI2 (XT) UART protocol
+- SCI2 TDRE state modeling with TXI2 interrupt generation for XT radio state machine
+- SCI2 DTC bulk transfer for XT radio packet TX/RX
+- Per-byte full-duplex SCI responses (0xFF idle, command response on 3rd byte)
+- Heartbeat beacons every 5 seconds for peer discovery
 - LAN radio networking via UDP multicast (--radio lan)
 - SDR TCP bridge stub for GNU Radio integration (--radio sdr)
 - V2 RF object blacklist conditionally relaxed when radio transport is connected
