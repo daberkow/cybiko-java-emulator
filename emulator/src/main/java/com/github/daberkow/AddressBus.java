@@ -515,14 +515,9 @@ public class AddressBus {
             }
         }
 
-        // DTC registers (V1/V2)
-        if (!config.hasDma) {
-            if (address >= 0xFFFF30 && address <= 0xFFFF35) {
-                return onChipRam.read8(onChipOffset(address));
-            }
-            if (address == 0xFFFF37) {
-                return onChipRam.read8(onChipOffset(address));
-            }
+        // DTC registers (all machines — H8S/2323 has both DMA and DTC)
+        if (address >= 0xFFFF30 && address <= 0xFFFF37) {
+            return onChipRam.read8(onChipOffset(address));
         }
 
         // System control
@@ -680,6 +675,7 @@ public class AddressBus {
                 executeSci1Dtc(value);
             }
             if (reg == 2 && channel == 2) { // SCI2 SCR write
+                executeSci2Dtc(value & 0xFF); // Check for DTC transfer
                 int oldScr = sci2Scr;
                 sci2Scr = value & 0xFF;
                 // If TIE just enabled and TDRE is already set, schedule first TXI2
@@ -906,6 +902,76 @@ public class AddressBus {
             int ssr = onChipRam.read8(onChipOffset(0xFFFF84));
             onChipRam.write8(onChipOffset(0xFFFF84), ssr & ~0x60);
             write8(0x20023C, 0x01);
+        }
+    }
+
+    /**
+     * Simulate DTC for SCI2 radio bulk transfers (XT).
+     * DTCERF (0xFFFF35) bit 6 = RXI2, bit 5 = TXI2.
+     * DTC register info blocks: RX at 0xFFFBE8, TX at 0xFFFBF4.
+     */
+    private void executeSci2Dtc(int scrValue) {
+        boolean receiveMode = (scrValue & 0x50) == 0x50; // RE + RIE
+        boolean transmitMode = (scrValue & 0xA0) == 0xA0; // TE + TIE
+        if (!receiveMode && !transmitMode) return;
+
+        int dtcerf = onChipRam.read8(onChipOffset(0xFFFF35));
+        boolean rxiDtc = (dtcerf & 0x40) != 0; // bit 6 = RXI2
+        boolean txiDtc = (dtcerf & 0x20) != 0; // bit 5 = TXI2
+        if (!rxiDtc && !txiDtc) return;
+
+        // Read DTC register info block
+        int dtcBase;
+        if (txiDtc && transmitMode) {
+            dtcBase = onChipOffset(0xFFFBF4); // TX block
+        } else if (rxiDtc && receiveMode) {
+            dtcBase = onChipOffset(0xFFFBE8); // RX block
+        } else {
+            return;
+        }
+
+        int mra = onChipRam.read8(dtcBase);
+        int sarLo = (onChipRam.read8(dtcBase + 1) << 16)
+                  | (onChipRam.read8(dtcBase + 2) << 8)
+                  | onChipRam.read8(dtcBase + 3);
+        int darHi = onChipRam.read8(dtcBase + 4);
+        int darLo = (onChipRam.read8(dtcBase + 5) << 16)
+                  | (onChipRam.read8(dtcBase + 6) << 8)
+                  | onChipRam.read8(dtcBase + 7);
+        int dar = (darHi << 24) | darLo;
+        int count = (onChipRam.read8(dtcBase + 8) << 8)
+                  | onChipRam.read8(dtcBase + 9);
+
+        if (count == 0) return;
+
+        if (radio != null) {
+            if (txiDtc && transmitMode) {
+                // TX DTC: send bytes from RAM buffer through radio
+                byte[] txData = new byte[count];
+                for (int i = 0; i < count; i++) {
+                    int b = read8(sarLo + i);
+                    txData[i] = (byte) b;
+                    radio.transfer(b);
+                }
+                radio.handleTransmit(txData);
+            } else if (rxiDtc && receiveMode) {
+                // RX DTC: read bytes from radio into RAM buffer
+                for (int i = 0; i < count; i++) {
+                    int b = radio.hasData() ? radio.read() : 0xFF;
+                    write8(dar + i, b);
+                }
+            }
+        }
+
+        // Clear DTC count and DTCERF bits
+        onChipRam.write8(dtcBase + 8, 0);
+        onChipRam.write8(dtcBase + 9, 0);
+        int clearedBits = txiDtc ? 0x20 : 0x40;
+        onChipRam.write8(onChipOffset(0xFFFF35), dtcerf & ~clearedBits);
+
+        // Fire TXI2 completion interrupt (state machine continues after DTC transfer)
+        if (cpu != null) {
+            cpu.requestInterrupt(90); // TXI2
         }
     }
 
