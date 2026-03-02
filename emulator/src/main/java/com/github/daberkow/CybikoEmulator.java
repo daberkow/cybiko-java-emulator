@@ -26,6 +26,7 @@ public class CybikoEmulator {
     private final H8STimer16[] timer16;
 
     private AT45DB041Flash spiFlash;   // V1/V2
+    private RadioCoProcessor radio;
     private FrameBufferRenderer renderer;
     private SpeakerOutput speaker;
     private boolean running = false;
@@ -77,6 +78,9 @@ public class CybikoEmulator {
 
         cpu = new H8SCpu(bus);
         bus.setCpu(cpu);
+
+        radio = new RadioCoProcessor();
+        bus.setRadio(radio);
 
         // Create timer peripherals
         timer8_0 = new H8STimer8(0, cpu);
@@ -164,6 +168,7 @@ public class CybikoEmulator {
     public H8STimer8 getTimer8(int ch) { return ch == 0 ? timer8_0 : timer8_1; }
     public H8STimer16 getTimer16(int ch) { return ch < timer16.length ? timer16[ch] : null; }
     public int getTimer16Count() { return timer16.length; }
+    public RadioCoProcessor getRadio() { return radio; }
 
     /** Initialize and start running (non-blocking). */
     public void start() {
@@ -365,6 +370,8 @@ public class CybikoEmulator {
             System.out.println("  --list-apps       - List apps in NVRAM and exit");
             System.out.println("  --mute            - Disable audio output");
             System.out.println("  --remote-display <port> - Enable remote display TCP server on port");
+            System.out.println("  --radio <lan|sdr>  - Enable radio (lan=UDP multicast, sdr=TCP bridge)");
+            System.out.println("  --radio-id <n>     - Set radio device ID (default: random)");
             System.exit(1);
         }
 
@@ -373,6 +380,8 @@ public class CybikoEmulator {
         boolean mute = false;
         boolean listApps = false;
         int remotePort = 0;
+        String radioMode = null;
+        int radioDeviceId = 0;
         MachineConfig.MachineType machineType = MachineConfig.MachineType.XT;
 
         // Parse arguments
@@ -407,6 +416,8 @@ public class CybikoEmulator {
                 case "--app" -> { if (i + 1 < args.length) appPaths.add(args[++i]); }
                 case "--dataflash" -> { if (i + 1 < args.length) spiFlashPath = args[++i]; }
                 case "--remote-display" -> { if (i + 1 < args.length) remotePort = Integer.parseInt(args[++i]); }
+                case "--radio" -> { if (i + 1 < args.length) radioMode = args[++i].toLowerCase(); }
+                case "--radio-id" -> { if (i + 1 < args.length) radioDeviceId = Integer.parseInt(args[++i]); }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
