@@ -375,16 +375,178 @@ Emulator A                              Emulator B
 +-----------+                           +-----------+
 ```
 
+## SCI0 Protocol Analysis (Captured from Emulator)
+
+### Methodology
+
+Captured SCI0 TDR hex output from headless emulator runs using the `[SCI0-TX]` log
+added in the emulator's `AddressBus.java`. Each byte written to SCI0 TDR (0xFFFF7B)
+is logged. The emulator currently provides no SCI0 RDR response (SSR always returns
+`TDRE|TEND = 0x84`, never `RDRF`), so CyOS sends commands but never receives replies.
+
+### Captured Traffic by Machine and CyOS Version
+
+#### XT (CyOS v1508) — No SCI0 Traffic
+
+```
+(silence — zero bytes written to SCI0 TDR during 30+ seconds of headless boot)
+```
+
+XT CyOS v1508 does **not** write to SCI0 at any point during boot, even after
+reaching the "Congratulations" welcome screen or the desktop home screen (with
+NVRAM). The XT's radio driver either:
+- Uses a completely different communication mechanism, or
+- Does not attempt radio init until explicitly triggered by user action, or
+- Has been removed/disabled in v1508 (a late Xtreme-specific firmware)
+
+This explains why XT boots successfully without any radio emulation [^11].
+
+#### V1 Classic (CyOS v1246) — Init Commands Only
+
+```
+Frame ~60-120:  01 02 02 01 03 00    (6 bytes, one burst)
+```
+
+V1 sends two 3-byte commands during early CyOS init (after SPI flash loading, before
+the animated Cybiko logo). After sending these commands, V1 CyOS does **not** wait
+for a response and proceeds to boot fully. V1 does not gate boot on RF readiness.
+
+#### V2 (CyOS v1358) — Two Init Commands, Then Stops
+
+```
+Frame ~0-60:    01 04 00             (3 bytes)
+Frame ~1080:    01 02 02             (3 bytes)
+(no further SCI0 traffic, even after 60 seconds)
+```
+
+V2 v1358 sends the first command (`01 04 00`) during very early boot (before frame 60,
+during SPI flash loading). The second command (`01 02 02`) comes much later at frame
+~1080, after the system transitions from SPI loading to CyOS init (vram hash changes
+from `4ACC524E` to `C0DBEF72` = Cybiko logo). After these two commands, v1358 gives up
+and enters the main loop where the service stub keeps it running but stuck at the logo.
+
+#### V2 (CyOS v1357) — Single Command, Stalls Early
+
+```
+Frame ~0-60:    01 04 00             (3 bytes only)
+(no further SCI0 traffic)
+```
+
+V2 v1357 sends only the first init command and stalls earlier than v1358. The second
+command (`01 02 02`) never appears, suggesting v1357 blocks waiting for a response to
+`01 04 00` before proceeding.
+
+#### V2 (CyOS v1355) — Init + Periodic Polling
+
+```
+Frame ~0-60:    01 04 00             (3 bytes)
+Frame ~120-180: 01 02 02             (3 bytes)
+Frame ~420:     30 00                (2 bytes — repeats every ~300 frames / 5 seconds)
+Frame ~780:     30 00
+Frame ~1140:    30 00
+...             30 00                (continues indefinitely)
+```
+
+V2 v1355 shows the most complete picture. After the two init commands, it enters a
+**periodic polling loop** sending `30 00` every ~5 seconds (correlated with timer8_1
+interrupts, intervals of ~300 frames). This `30 00` pattern likely represents a
+"status query" or "are you there?" heartbeat to the AVR co-processor.
+
+### Command Format Analysis
+
+All observed SCI0 transmissions follow a pattern:
+
+```
+Byte 0: Command type / packet header
+Byte 1: Sub-command or parameter
+Byte 2: Data / parameter (when present)
+```
+
+| Hex Bytes | Seen In | Interpretation |
+|-----------|---------|----------------|
+| `01 04 00` | V2 (all versions) | Init command #1 — possibly "reset" or "query firmware version" |
+| `01 02 02` | V1 v1246, V2 v1358, V2 v1355 | Init command #2 — possibly "configure" or "set mode" |
+| `01 03 00` | V1 v1246 only | Init command #3 — V1-specific, possibly "set channel" or "enable RX" |
+| `30 00` | V2 v1355 only | Periodic poll — `0x30` = ASCII '0', possibly status query |
+
+**Observations:**
+- The `01` prefix byte appears in all init commands — likely a command/packet marker
+- V1 sends `01 02 02` before `01 03 00`; V2 sends `01 04 00` before `01 02 02`
+- The different ordering suggests V1 and V2 have slightly different radio drivers
+- `01 02 02` is shared between V1 and V2, suggesting a common "configure" command
+- `01 04 00` is V2-only and comes first — may be a V2-specific init step
+- `30 00` polling only appears in the oldest V2 CyOS (v1355) — newer versions
+  may have removed the retry loop or changed the timeout behavior
+- XT v1508 has no radio init at all — may have moved to a different architecture
+
+### Current SCI0 Handling in Emulator
+
+```
+SCI0 SSR (0xFFFF7C) read:  always returns 0x84 (TDRE=1, TEND=1, RDRF=0)
+SCI0 RDR (0xFFFF7D) read:  returns 0x00 (default on-chip RAM value)
+SCI0 TDR (0xFFFF7B) write: logged to sci0TdrLog, appended to sciOutput[0]
+```
+
+CyOS writes commands to TDR but never sees RDRF set, so it never reads a response
+from RDR. This is why V2 RF init stalls — the driver sends `01 04 00` and waits
+for a reply that never comes.
+
+### Dump Files in ROM Directory (Not Cybiko-Related)
+
+The files `dump1.bin` (4096 bytes) and `dump5.bin` (4096 bytes) found in the
+`roms/cybikov2/` directory are **NOT** Cybiko AVR firmware. They are firmware dumps
+for the Soviet IE15 terminal, an entirely unrelated MAME-emulated machine:
+
+```
+dump1.bin: SHA1 = 5ac4159fbb1c3b81445605e26cd97a713ae12b5f  → IE15 5-chip firmware
+dump5.bin: SHA1 = 2b72dc0594e38a528400cd25aed0c47e0c432895  → IE15 6-chip firmware
+```
+
+These match `src/devices/machine/ie15.cpp` in MAME source (line 689–691). They ended
+up in the Cybiko ROM directory because the ROM collection was extracted from a combined
+MAME ROM pack and the filenames collided. Similarly, `chargen-15ie.bin` (2048 bytes)
+is the IE15 character generator ROM (SHA1 matches ie15.cpp line 696).
+
+**No AT90S2313 AVR firmware dump exists in any available ROM files.** The AVR firmware
+was never dumped by the MAME community. This is expected — the AT90S2313's lock bits
+may have been set to prevent readout.
+
+### Recommendations for RadioCoProcessor Implementation
+
+Based on the captured protocol data:
+
+1. **Minimum viable stub**: Respond to `01 04 00` with an ACK byte on SCI0 RDR
+   (set RDRF in SSR). This should unblock V2 v1357 which stalls on the first command.
+
+2. **Init sequence**: Handle both `01 04 00` and `01 02 02` with appropriate responses.
+   The response format is unknown but likely mirrors the command format (3-byte
+   packets with a status/ACK header).
+
+3. **Polling response**: For v1355's `30 00` heartbeat, respond with a status byte
+   indicating "radio present, no data pending."
+
+4. **XT compatibility**: XT v1508 doesn't use SCI0 at all, so the RadioCoProcessor
+   can be safely wired without affecting XT boot.
+
+5. **Protocol discovery**: To determine the correct response bytes, disassemble the
+   V2 CyOS radio driver code around the SCI0 access patterns. The driver code
+   should contain the expected response values.
+
 ## Open Questions
 
-1. **SCI0 UART Protocol** — The exact byte-level protocol between H8S and AVR is
-   completely undocumented. This is the single biggest blocker [^3].
+1. ~~**SCI0 UART Protocol** — The exact byte-level protocol between H8S and AVR is
+   completely undocumented. This is the single biggest blocker [^3].~~
+   **Partially resolved** — init command sequences captured (see above). Response
+   format still unknown; requires CyOS radio driver disassembly.
 
-2. **AVR Firmware Availability** — The AT90S2313 firmware blob may be in MAME ROM
-   dumps. If available, disassembly of the 2 KB flash reveals everything [^6].
+2. **AVR Firmware Availability** — The AT90S2313 firmware is **not** in any available
+   ROM dumps. The dump files in `roms/cybikov2/` are unrelated IE15 firmware [^6].
+   The AVR lock bits were likely set to prevent readout.
 
-3. **V2 vs XT Boot Dependency** — V2 CyOS blocks on RF init; XT boots without it.
-   The XT may have a different RF driver or simply not gate boot on radio [^11].
+3. ~~**V2 vs XT Boot Dependency** — V2 CyOS blocks on RF init; XT boots without it.~~
+   **Resolved** — XT CyOS v1508 does not write to SCI0 at all during boot. V1 CyOS
+   v1246 writes init commands but does not block on responses. V2 CyOS (all versions)
+   writes init commands and blocks waiting for responses.
 
 4. **Channel Selection Algorithm** — How CyOS picks channels (fixed assignment?
    frequency hopping?) is unknown [^4].
@@ -392,17 +554,25 @@ Emulator A                              Emulator B
 5. **Packet Format Details** — Beyond 50/200 byte frames with Manchester encoding
    and sync bits, the header/payload/checksum structure is unknown [^4].
 
+6. **V2 CyOS Version Differences** — v1355 sends more SCI0 traffic (periodic `30 00`
+   polling) than v1357 or v1358. Different versions may need different stub responses.
+
+7. **Response Format** — What bytes should the RadioCoProcessor return on SCI0 RDR
+   after receiving each init command? Requires disassembly of the radio driver.
+
 ## What Would Unlock Progress
 
-- **Logic analyzer** on SCI0 lines of a real Cybiko during boot/messaging — would
-  instantly reveal the UART protocol
+- ~~**Logic analyzer** on SCI0 lines of a real Cybiko during boot/messaging~~ —
+  emulator SCI0 logging now captures the H8S→AVR direction; AVR→H8S direction
+  requires stub implementation with trial-and-error or CyOS disassembly
 - **SDR capture** of RF traffic between two Cybikos — reveals air interface protocol,
   modulation parameters, channel usage patterns
-- **AT90S2313 firmware dump** — only 2 KB, straightforward AVR disassembly [^6]
+- ~~**AT90S2313 firmware dump**~~ — confirmed not available in any ROM files
 - **V2 CyOS radio driver disassembly** — use H8SDisasm on the decompressed CyOS
-  image around the SCI0 access patterns
-- **Different V2 ROM versions** (v1355, v1357, v1358) — some may be less aggressive
-  about blocking boot on RF readiness
+  image around the SCI0 access patterns (addresses near 0x107xxx in V2 RAM)
+- ~~**Different V2 ROM versions** (v1355, v1357, v1358) — some may be less aggressive
+  about blocking boot on RF readiness~~ — **tested**: all three block, v1355 most
+  verbose (periodic polling), v1357 most aggressive (stalls on first command)
 
 ---
 
@@ -479,3 +649,8 @@ USBN9604 datasheet available from [TI](https://www.ti.com/lit/ds/symlink/usbn960
 
 [^15]: DBZoo Xtreme Hardware page, [dbzoo.com/cybiko/extremehardware](http://www.dbzoo.com/cybiko/extremehardware).
 Component identification and datasheet links for the Xtreme board.
+
+[^16]: SCI0 protocol analysis performed 2026-03-01 using emulator's `AddressBus.java`
+SCI0 TDR hex logging. Captured from headless runs of V1 (cyrom112+flash_v1246),
+V2 (cyrom117+cyos_v1358/v1357/v1355+flash), and XT (cyrom150+cyos_v1508).
+IE15 ROM identification via SHA1 comparison with MAME `src/devices/machine/ie15.cpp`.
