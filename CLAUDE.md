@@ -195,12 +195,19 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
   keyboard layout. Queue-based Fn+letter injection for XT number keys. Minimum key hold
   time (3 frames) for all keys.
 - `RadioCoProcessor` - AVR radio co-processor stub (AT90S2313). Emulates SCI UART
-  protocol with the H8S CPU. 3-byte command protocol (header + cmd + param), responds
-  with ACKs. Per-byte full-duplex responses (0xFF for intermediate bytes, command
-  response on 3rd byte). Tracks initialization state and current radio channel.
-  Heartbeat beacon every 5 seconds for peer discovery. Connected via SCI0
-  (V1/V2, 0xFFFF78-0xFFFF7E) or SCI2 (XT, 0xFFFF88-0xFFFF8E) with interrupt-driven
-  TXI2 (vector 90) support. DTC bulk transfer for packet TX/RX via DTCERF (0xFFFF35).
+  protocol with the H8S CPU. Variable-length command protocol: 0x01=3 bytes (init,
+  channel, config), 0x30/0xCF=2 bytes (poll, scan), all others=2 bytes. Two call paths:
+  `transfer()` for SCI0 full-duplex (V1/V2), `receive()` for SCI2 async UART (XT).
+  3-byte commands queue ACK (0x00) responses; 2-byte commands produce no immediate
+  response (ACK comes via DTC completion path). `completeTxDtc()` queues TX ACK
+  (0x03) and frame indicator (0x32/0xC8). Frame data is delivered via RX DTC: CyOS
+  sets DTCERF bit 7 after receiving 0x32/0xC8, and AddressBus bulk-transfers 50/200
+  bytes to a RAM buffer via `prepareRxFrame()`. A dummy completion byte triggers the
+  RXI2 ISR in state 4 for frame delivery to the CyOS application layer. TX DTC data
+  has 8-byte RF header (4B preamble + 4B sync word) stripped before forwarding to peer
+  emulators (RF2915 strips these on receive). Connected via SCI0 (V1/V2) or SCI2 (XT)
+  with TXI2/RXI2 interrupt support. Both TX DTC (DTCERF bit 6) and RX DTC (bit 7)
+  are handled by `executeSci2Dtc()`.
 - `RadioTransport` - Interface for radio network layer. Implementations:
   `UdpMulticastTransport` (LAN via multicast 239.0.0.42:19200),
   `SdrTransport` (TCP bridge to GNU Radio on localhost:19201).
@@ -359,15 +366,17 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   bypass startup waits. The RF object (0x202CB2) must never be resolved via stub —
   causes failed HW init. See V2 Investigation below. MAME also cannot fully boot V2
   CyOS with these ROMs.
-- **XT radio partially working**: CyOS v1508 uses SCI2 (not SCI0) for radio. During
-  boot, CyOS sends channel init command (`01 02 02`) via polled I/O on SCI2 (SCR=0x70).
-  Full radio features (Chat, Friend Finder, E-mail, multiplayer) are deferred until the
-  user opens them via the GUI. When activated, CyOS enables TXI2 interrupts (SCR bit 7)
-  to drive the radio state machine. SCI2 TDRE modeling, TXI2 (vector 90) interrupt
-  generation, per-byte responses, and DTC bulk transfer are all implemented and ready.
-  Heartbeat beacons broadcast every 5 seconds via UDP multicast. The poll cycle
-  (repeating 0x30 commands) and peer discovery require GUI interaction to trigger.
-  Parental permission system may also gate radio access.
+- **XT radio RX DTC implemented, peer discovery pending verification**: CyOS v1508
+  uses SCI2 for radio with hardware DTC for both TX and RX. TX DTC sends outgoing
+  frames (51/201 bytes). RX DTC bulk-transfers 50/200 bytes from SCI2 RDR to a RAM
+  buffer (DTCERF bit 7). Previous per-byte RXI2 delivery caused state machine
+  corruption (state 4 completed after 1 byte instead of 50). Now: completeTxDtc()
+  queues [0x03, 0x32/0xC8] indicator only, then CyOS sets up RX DTC which
+  executeSci2Dtc() handles via prepareRxFrame(). A dummy completion byte triggers
+  the RXI2 ISR for state 4/5 frame delivery. The 8-byte RF header (preamble + sync
+  word) is stripped before network forwarding. Chat peer discovery not yet verified
+  with GUI — requires two emulators with Chat open. See
+  [docs/rf2915-research.md](docs/rf2915-research.md) for decoded frame format.
 
 ## Current Status
 - Multi-machine support: V1 (Classic), V2, and XT (Xtreme) selectable via --machine flag
@@ -386,10 +395,14 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - Frame time ~4ms (24% of 16.7ms budget), JIT-optimized after first second
 - No unimplemented opcodes in the current execution path
 - Radio co-processor stub handles SCI0 (V1/V2) and SCI2 (XT) UART protocol
-- SCI2 TDRE state modeling with TXI2 interrupt generation for XT radio state machine
-- SCI2 DTC bulk transfer for XT radio packet TX/RX
-- Per-byte full-duplex SCI responses (0xFF idle, command response on 3rd byte)
-- Heartbeat beacons every 5 seconds for peer discovery
+- Variable-length command framing (0x01=3 bytes, 0x30/0xCF=2 bytes)
+- SCI2 async UART: receive() for TX path, RXI2 (vector 89) for response delivery
+- SCI2 TDRE state modeling with TXI2 (vector 90) interrupt generation
+- SCI2 DTC bulk transfer: TX via DTCERF bit 6, RX via DTCERF bit 7
+- TX DTC completion: 0x03 ACK + 0x32/0xC8 frame size indicator (50=data, 200=null)
+- RX DTC: 50/200-byte bulk transfer from SCI2 RDR to RAM buffer, completion ISR delivers frame
+- RF header stripping: 8-byte preamble+sync removed from TX before network forwarding
+- CyOS radio frame format partially decoded (see docs/rf2915-research.md)
 - LAN radio networking via UDP multicast (--radio lan)
 - SDR TCP bridge stub for GNU Radio integration (--radio sdr)
 - V2 RF object blacklist conditionally relaxed when radio transport is connected

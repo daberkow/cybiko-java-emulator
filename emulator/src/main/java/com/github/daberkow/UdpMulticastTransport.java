@@ -5,6 +5,7 @@ import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
+import java.net.NetworkInterface;
 import java.nio.ByteBuffer;
 
 /**
@@ -63,7 +64,26 @@ public class UdpMulticastTransport implements RadioTransport {
     public void start() throws IOException {
         socket = new MulticastSocket(port);
         socket.setTimeToLive(1); // LAN only
-        socket.joinGroup(new InetSocketAddress(group, port), null);
+        socket.setLoopbackMode(false); // Enable loopback (same-host delivery)
+        // Join on all interfaces to ensure same-host delivery works regardless
+        // of which interface the kernel routes multicast through.
+        var ifaces = NetworkInterface.getNetworkInterfaces();
+        boolean joined = false;
+        while (ifaces.hasMoreElements()) {
+            NetworkInterface ni = ifaces.nextElement();
+            if (ni.isUp() && ni.supportsMulticast()) {
+                try {
+                    socket.joinGroup(new InetSocketAddress(group, port), ni);
+                    joined = true;
+                } catch (IOException e) {
+                    // Some interfaces can't join multicast (e.g. tun/tap)
+                }
+            }
+        }
+        if (!joined) {
+            // Fallback: join with default interface
+            socket.joinGroup(new InetSocketAddress(group, port), null);
+        }
         running = true;
 
         listenerThread = new Thread(this::listenLoop, "radio-udp");
@@ -108,11 +128,6 @@ public class UdpMulticastTransport implements RadioTransport {
     public void close() {
         running = false;
         if (socket != null) {
-            try {
-                socket.leaveGroup(new InetSocketAddress(group, port), null);
-            } catch (IOException ignored) {
-                // Best-effort leave on shutdown
-            }
             socket.close();
         }
         if (listenerThread != null) {
@@ -135,11 +150,17 @@ public class UdpMulticastTransport implements RadioTransport {
 
                 // Filter own packets and wrong channel
                 if (senderId == deviceId) continue;
-                if (channel != currentChannel) continue;
+                if (channel != currentChannel) {
+                    System.err.printf("[RADIO-UDP] RX filtered: sender=0x%08X ch=%d (listening on %d)%n",
+                            senderId, channel, currentChannel);
+                    continue;
+                }
 
                 byte[] payload = new byte[pkt.getLength() - HEADER_SIZE];
                 bb.get(payload);
 
+                System.err.printf("[RADIO-UDP] RX from 0x%08X ch=%d %d bytes%n",
+                        senderId, channel, payload.length);
                 PacketListener l = listener;
                 if (l != null) {
                     l.onPacketReceived(payload, channel, senderId);

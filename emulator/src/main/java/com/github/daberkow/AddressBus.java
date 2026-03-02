@@ -98,6 +98,7 @@ public class AddressBus {
     private boolean sci2Tdre = true;   // SCI2 TDRE flag (transmitter data register empty)
     private int sci2TxiDelay = 0;      // Countdown cycles until next TXI2 fires (0 = none pending)
     private static final int SCI2_TXI_DELAY = 32; // Cycles between TXI2 fires (~byte transmission time)
+    private int sci2PendingIndicator = -1; // Deferred frame indicator (0x32/0xC8) from TX DTC completion
 
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
@@ -154,6 +155,8 @@ public class AddressBus {
      * Tick SCI2 interrupt generation. Call from main loop after each cpu.step().
      * When a byte finishes "transmitting" (delay expires), TDRE goes high.
      * If TIE is set in SCR, fires TXI2 (vector 90).
+     * When the radio has response data and RDRF is clear, delivers it to RDR
+     * and fires RXI2 (vector 89) if RIE is set in SCR.
      */
     public void tickSci2() {
         if (sci2TxiDelay > 0) {
@@ -164,6 +167,15 @@ public class AddressBus {
                 if ((sci2Scr & 0x80) != 0 && cpu != null) {
                     cpu.requestInterrupt(90); // TXI2
                 }
+            }
+        }
+        // RXI2: deliver radio response to RDR when RDRF is clear
+        if (radio != null && radioSciChannel == 2 && !sci0Rdrf && radio.hasData()) {
+            sci0Rdr = radio.read();
+            sci0Rdrf = true;
+            // Fire RXI2 if RIE is enabled in SCR
+            if ((sci2Scr & 0x40) != 0 && cpu != null) {
+                cpu.requestInterrupt(89); // RXI2
             }
         }
     }
@@ -652,9 +664,16 @@ public class AddressBus {
                     sci2TdrLog.add(value & 0xFF);
                 }
                 if (channel == radioSciChannel && radio != null) {
-                    int response = radio.transfer(value & 0xFF);
-                    sci0Rdr = response;
-                    sci0Rdrf = true;
+                    if (channel == 2) {
+                        // SCI2 (XT): UART half-duplex. Feed byte to radio but don't
+                        // consume response. Response delivered asynchronously via RXI2.
+                        radio.receive(value & 0xFF);
+                    } else {
+                        // SCI0 (V1/V2): synchronous full-duplex
+                        int response = radio.transfer(value & 0xFF);
+                        sci0Rdr = response;
+                        sci0Rdrf = true;
+                    }
                     // SCI2: model TDRE — clear on TDR write, restore after transmission delay.
                     // Always schedule TDRE restoration (real HW restores TDRE after byte TX
                     // regardless of TIE). TIE only controls whether TXI2 interrupt fires.
@@ -684,6 +703,9 @@ public class AddressBus {
                 if (tieEnabled && sci2Tdre && (tieWasOff || sci2TxiDelay == 0)) {
                     sci2TxiDelay = SCI2_TXI_DELAY;
                 }
+                // Note: deferred indicator delivery is handled in the DTCERF handler
+                // (when TXI2 ISR clears bit 6), not here. The timer callback also
+                // clears TIE before the TXI2 ISR runs, so TIE-clear is unreliable.
             }
             onChipRam.write8(onChipOffset(address), value);
             return;
@@ -787,6 +809,34 @@ public class AddressBus {
                 }
                 return;
             }
+        }
+
+        // DTCERF (0xFFFF35) — SCI2 DTC enable register.
+        // CyOS may write DTCERF (via BSET) after SCR is already configured with
+        // RIE/TIE enabled. In real hardware, the DTC fires on the next interrupt
+        // (RDRF/TDRE). Our shortcut triggers DTC on register writes, so we must
+        // trigger on DTCERF writes too, not just SCR writes.
+        if (address == 0xFFFF35 && radio != null && radioSciChannel == 2) {
+            int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+            System.err.printf("[SCI2-DTCERF] write 0x%02X PC=0x%06X sci2Scr=0x%02X%n",
+                    value & 0xFF, pc, sci2Scr);
+            onChipRam.write8(onChipOffset(address), value);
+            if ((value & 0xC0) != 0) {
+                executeSci2Dtc(sci2Scr);
+            }
+            // Deferred indicator delivery: when TXI2 ISR clears DTCERF bit 6
+            // (BCLR #6 at 0x49BEEC), queue the frame indicator. This happens
+            // INSIDE the TXI2 ISR (I-flag set), so RXI2 won't fire until after
+            // the ISR completes (RTE), by which point state has transitioned to 1.
+            // We can't use the SCR TIE-clear transition because the timer callback
+            // also clears TIE (at 0x49BD60) BEFORE the TXI2 ISR runs.
+            if (sci2PendingIndicator >= 0 && (value & 0x40) == 0) {
+                System.err.printf("[SCI2-DTC] Deferred indicator 0x%02X delivered (DTCERF cleared at PC=0x%06X)%n",
+                        sci2PendingIndicator, pc);
+                radio.queueResponse(sci2PendingIndicator);
+                sci2PendingIndicator = -1;
+            }
+            return;
         }
 
         // System control, watchdog stubs
@@ -907,8 +957,14 @@ public class AddressBus {
 
     /**
      * Simulate DTC for SCI2 radio bulk transfers (XT).
-     * DTCERF (0xFFFF35) bit 6 = RXI2, bit 5 = TXI2.
+     * DTCERF (0xFFFF35) bit 7 = RXI2, bit 6 = TXI2.
      * DTC register info blocks: RX at 0xFFFBE8, TX at 0xFFFBF4.
+     *
+     * CyOS radio protocol (from disassembly at 0x49B9B4):
+     *   1. Polled TX: 2-byte command header (30/CF + param)
+     *   2. TX DTC: 51 or 201 bytes of packet data from RAM to TDR
+     *   3. TXI2 ISR (vector 90, handler at 0x49BEE4): transitions state 2 → 1
+     *   4. Radio indicator (0x32/0xC8) via RXI2 → state 1 → frame receive setup
      */
     private void executeSci2Dtc(int scrValue) {
         boolean receiveMode = (scrValue & 0x50) == 0x50; // RE + RIE
@@ -916,9 +972,11 @@ public class AddressBus {
         if (!receiveMode && !transmitMode) return;
 
         int dtcerf = onChipRam.read8(onChipOffset(0xFFFF35));
-        boolean rxiDtc = (dtcerf & 0x40) != 0; // bit 6 = RXI2
-        boolean txiDtc = (dtcerf & 0x20) != 0; // bit 5 = TXI2
-        if (!rxiDtc && !txiDtc) return;
+        boolean rxiDtc = (dtcerf & 0x80) != 0; // bit 7 = RXI2
+        boolean txiDtc = (dtcerf & 0x40) != 0; // bit 6 = TXI2
+        if (!rxiDtc && !txiDtc) {
+            return;
+        }
 
         // Read DTC register info block
         int dtcBase;
@@ -927,6 +985,8 @@ public class AddressBus {
         } else if (rxiDtc && receiveMode) {
             dtcBase = onChipOffset(0xFFFBE8); // RX block
         } else {
+            System.err.printf("[SCI2-DTC] mode mismatch: rx=%b tx=%b rxiDtc=%b txiDtc=%b%n",
+                    receiveMode, transmitMode, rxiDtc, txiDtc);
             return;
         }
 
@@ -946,33 +1006,65 @@ public class AddressBus {
 
         if (radio != null) {
             if (txiDtc && transmitMode) {
-                // TX DTC: send bytes from RAM buffer through radio
+                // TX DTC: read packet bytes from RAM buffer and transmit over network.
+                // These are raw radio packet data, NOT command bytes — don't feed to
+                // the command parser. handleTransmit sends the data via UDP/SDR.
                 byte[] txData = new byte[count];
                 for (int i = 0; i < count; i++) {
-                    int b = read8(sarLo + i);
-                    txData[i] = (byte) b;
-                    radio.transfer(b);
+                    txData[i] = (byte) read8(sarLo + i);
                 }
                 radio.handleTransmit(txData);
+                // Defer indicator delivery: store the 0x32/0xC8 indicator for
+                // later. The TXI2 ISR must run first (transitions state 2→1)
+                // before the indicator can be processed by RXI2 in state 1.
+                // Delivery happens in the SCR write handler when TIE is cleared.
+                sci2PendingIndicator = radio.completeTxDtc();
+                // Fire TXI2 completion interrupt so CyOS's TXI2 ISR runs
+                // the TX DTC completion handler (0x49BEE4: clears TIE, calls
+                // TX complete handler at 0x49C5F0 which transitions state 2→1).
+                if (cpu != null) {
+                    cpu.requestInterrupt(90); // TXI2
+                }
+                // Log TX DTC with hex + ASCII
+                StringBuilder txHex = new StringBuilder();
+                StringBuilder txAscii = new StringBuilder();
+                for (int i = 0; i < Math.min(count, 52); i++) {
+                    int b = txData[i] & 0xFF;
+                    txHex.append(String.format("%02X ", b));
+                    txAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
+                }
+                System.err.printf("[SCI2-DTC] TX %d bytes from 0x%06X: %s |%s|%n",
+                        count, sarLo, txHex.toString().trim(), txAscii);
             } else if (rxiDtc && receiveMode) {
-                // RX DTC: read bytes from radio into RAM buffer
+                // RX DTC: CyOS sets DTCERF bit 7 after receiving 0x32/0xC8 frame
+                // indicator, expecting hardware DTC to bulk-transfer N bytes from
+                // SCI2 RDR to a RAM buffer. We execute this immediately.
+                radio.prepareRxFrame(count);
+                StringBuilder rxHex = new StringBuilder();
+                StringBuilder rxAscii = new StringBuilder();
                 for (int i = 0; i < count; i++) {
                     int b = radio.hasData() ? radio.read() : 0xFF;
                     write8(dar + i, b);
+                    if (i < 52) {
+                        rxHex.append(String.format("%02X ", b));
+                        rxAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
+                    }
                 }
+                // Queue a dummy byte so tickSci2() generates the RXI2 completion
+                // interrupt. On real hardware, when DTC count reaches 0, the
+                // normal RXI2 ISR fires (DISEL=0). CyOS ISR in state 4/5 calls
+                // the completion handler regardless of byte value.
+                radio.queueResponse(0xFF);
+                System.err.printf("[SCI2-DTC] RX %d bytes → 0x%06X: %s |%s|%n",
+                        count, dar, rxHex.toString().trim(), rxAscii);
             }
         }
 
         // Clear DTC count and DTCERF bits
         onChipRam.write8(dtcBase + 8, 0);
         onChipRam.write8(dtcBase + 9, 0);
-        int clearedBits = txiDtc ? 0x20 : 0x40;
+        int clearedBits = txiDtc ? 0x40 : 0x80;
         onChipRam.write8(onChipOffset(0xFFFF35), dtcerf & ~clearedBits);
-
-        // Fire TXI2 completion interrupt (state machine continues after DTC transfer)
-        if (cpu != null) {
-            cpu.requestInterrupt(90); // TXI2
-        }
     }
 
     private void writeOnChip16(int address, int value) {

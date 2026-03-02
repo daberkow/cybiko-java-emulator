@@ -181,9 +181,14 @@ The H8S communicates with the AVR over **SCI channel 0** (SCI0) at **53,333 baud
 
 **Key discovery:** XT CyOS v1508 uses **SCI2** for radio communication, not SCI0. The
 channel init command (`01 02 02`) is sent via SCI2 (0xFFFF88–0xFFFF8E) during boot
-using polled I/O (SCR=0x70 = RIE+TE+RE). When a radio feature is opened, CyOS is
-expected to switch to interrupt-driven mode with TIE enabled (SCR bit 7) and TXI2
-(vector 90) driving the state machine. V1/V2 continue to use SCI0 with polled I/O.
+using polled I/O (SCR=0x70 = RIE+TE+RE). When a radio feature is opened (e.g., Chat),
+CyOS switches to interrupt-driven mode with TIE enabled (SCR bit 7) and TXI2 (vector 90)
+driving a state machine. The RXI2 handler (vector 89) processes response bytes and
+advances through 8 protocol states. V1/V2 continue to use SCI0 with polled I/O.
+
+**MAME note:** MAME wires SCI2 to a debug serial port (RS232). In reality, XT CyOS
+uses SCI2 for the radio co-processor, not debug output. This is why MAME has no
+radio emulation for the XT.
 
 ### MAME Has No SCI0 Wiring
 
@@ -258,36 +263,142 @@ polled and interrupt-driven modes:
 This cycle allows CyOS's TXI2 interrupt handler to send one byte per invocation,
 read the response from RDR, and advance the radio protocol state machine.
 
-### Per-Byte Response Model
+### Variable-Length Command Framing
 
-Every TDR write generates a response byte (full-duplex SPI-like behavior):
+Commands sent to the AVR co-processor have **variable length** determined by the first
+byte. This was discovered through live SCI2-TX analysis with Chat open:
 
-| Byte position in command | Response |
-|--------------------------|----------|
+| First Byte | Length | Commands |
+|------------|--------|----------|
+| `0x01` | 3 bytes | Init, channel, config |
+| `0x30` | 2 bytes | Poll for received data |
+| `0xCF` | 2 bytes | Scan/beacon (peer discovery) |
+| All others | 2 bytes | Default |
+
+**Critical framing detail:** A fixed 3-byte assumption causes total framing corruption.
+The sequence `01 02 04 30 00 CF 00 30 00` contains four commands (`01 02 04`, `30 00`,
+`CF 00`, `30 00`), but a 3-byte parser reads it as `01 02 04`, `30 00 CF`, `00 30 00` —
+every command after the first `30` is misaligned.
+
+### Per-Byte Response Model (SCI0 / V1/V2)
+
+On SCI0, which behaves like full-duplex SPI, every TDR write generates a synchronous
+response byte:
+
+| Byte position in 3-byte command | Response |
+|---------------------------------|----------|
 | Byte 1 (header) | 0xFF (idle) |
 | Byte 2 (command) | 0xFF (idle) |
 | Byte 3 (param) | Command-specific response |
 
-Command responses (on 3rd byte):
+3-byte command responses (on 3rd byte):
 - `01 04 00` (init): 0x00 (ACK)
 - `01 02 NN` (set channel): 0x00 (ACK)
 - `01 03 00` (V1 init): 0x00 (ACK)
-- `30 XX XX` (poll): 0xC8 (no data) or 0x32 (data available)
+
+2-byte commands (`30 XX`, `CF XX`) do **not** queue immediate responses. Their response
+comes asynchronously via the DTC completion path (see below).
+
+### SCI2 Asynchronous Response Model (XT)
+
+On SCI2, TX and RX are independent UART paths — **not** full-duplex SPI. Responses are
+delivered asynchronously via RXI2 (vector 89) interrupts, not consumed synchronously
+during TDR writes:
+
+1. CyOS writes command bytes to TDR2 (0xFFFF8B)
+2. `RadioCoProcessor.receive()` accumulates bytes into a command buffer
+3. When a 3-byte command completes, the response is queued to `rxQueue`
+4. `tickSci2()` detects queued data, loads it into RDR2, sets RDRF
+5. If RIE is set in SCR2, RXI2 (vector 89) fires
+6. CyOS RXI2 handler reads RDR2 and advances its state machine
+
+For 2-byte commands (poll/scan), no immediate response is queued. Instead, CyOS follows
+the 2-byte header with a **TX DTC bulk transfer** (51 or 201 bytes of packet data). The
+response comes from the DTC completion path.
 
 ### DTC Bulk Transfer (DTCERF at 0xFFFF35)
 
-CyOS uses DTC for bulk radio packet TX/RX on SCI2:
+CyOS uses DTC for bulk radio packet TX/RX on SCI2. **DTCERF bit mapping** (corrected
+via CyOS disassembly — the H8S manual bit numbering differs from the physical wiring):
 
 | Bit | Source | Description |
 |-----|--------|-------------|
-| 7 | ERI2 | SCI2 Receive Error |
-| 6 | RXI2 | SCI2 Receive Data Register Full |
-| 5 | TXI2 | SCI2 Transmit Data Register Empty |
+| 7 | RXI2 | SCI2 Receive Data Register Full |
+| 6 | TXI2 | SCI2 Transmit Data Register Empty |
+| 5 | — | (not used by CyOS radio) |
 | 4 | TEI2 | SCI2 Transmit End |
+
+**Critical correction:** Initial implementation had bit 6=RXI2, bit 5=TXI2 which caused
+TX DTC to never fire. CyOS writes `DTCERF |= 0x40` to enable TXI2 DTC and `DTCERF |=
+0x80` to enable RXI2 DTC. This was confirmed by disassembling the radio TX function at
+0x49B9B4 in CyOS v1508.
 
 DTC register info blocks in on-chip RAM:
 - RX block at 0xFFFBE8: source=0xFFFF8D (SCI2 RDR), dest=RAM buffer
 - TX block at 0xFFFBF4: source=RAM buffer, dest=0xFFFF8B (SCI2 TDR)
+
+### TX DTC Protocol Flow
+
+When CyOS sends a radio packet (poll, scan, or data transmission), the full sequence is:
+
+```
+1. CyOS sends 2-byte command header (e.g., 30 00 or CF 00) via TDR writes
+2. CyOS sets up TX DTC: source=RAM buffer, dest=TDR2, count=51 or 201 bytes
+3. CyOS enables TXI2 DTC (DTCERF |= 0x40) and TIE (SCR bit 7)
+4. DTC autonomously transfers packet data bytes to TDR, one per TXI2 interrupt
+5. When DTC count reaches 0, TX DTC completes
+6. Emulator: executes entire DTC transfer immediately, queues 0x03 (packet ACK)
+7. TXI2 fires naturally when TDRE goes high — CyOS TXI2 ISR advances state machine
+8. RXI2 delivers 0x03 ACK — CyOS state machine reaches completion
+```
+
+The 51-byte transfer corresponds to a poll command (0x30), and 201-byte transfer to a
+scan/beacon command (0xCF). These are raw packet data, **not** radio commands — the DTC
+bytes should NOT be fed through the command parser.
+
+### CyOS RXI2 State Machine (XT, CyOS v1508)
+
+The RXI2 interrupt handler at 0x49BBF8 implements an 8-state protocol state machine.
+State is stored at `radioObj+0x335A`. The handler reads a byte from RDR2, then dispatches
+based on state via a jump table at 0x4823FC:
+
+| State | Jump Target | Expected Byte | Action |
+|-------|------------|---------------|--------|
+| 1 | 0x49BC7A | 0x32 or 0xC8 | Poll result (data available / no data) |
+| 2 | 0x49BC2E | 0x13 | TX DTC done ACK → state 3 |
+| 3 | 0x49BC54 | 0x11 | Ready → state 2 (re-enable DTC) |
+| 4 | 0x49BC92 | any | Handler with arg=0 |
+| 5 | 0x49BC9A | any | Handler with arg=1 |
+| 6 | 0x49BC70 | 0x03 | Packet received ACK → completion handler |
+| 7 | 0x49BCA2 | 0x13 | TX DTC done → state 8 (alternate cycle) |
+| 8 | 0x49BCBE | 0x11 | Ready → state 7 |
+
+**TXI2 ISR behavior** (at ~0x49BD30): The TXI2 handler's action depends on current state:
+- State 2 → transitions to state 6 (clears TIE, expects 0x03 next via RXI2)
+- State 3 → clears TIE only
+- State 7 → sends next byte to TDR from buffer
+
+**Response code summary:**
+
+| Code | Meaning | Used in States |
+|------|---------|----------------|
+| 0x03 | Packet received / TX complete ACK | 6 |
+| 0x11 | Ready for next transfer | 3, 8 |
+| 0x13 | TX DTC transfer done | 2, 7 |
+| 0x32 | Data available (poll result) | 1 |
+| 0xC8 | No data available (poll result) | 1 |
+
+**Typical TX flow through states:**
+```
+State 2: Wait for 0x13 (TX DTC done)
+  → TXI2 fires: state 2 → state 6 (TIE cleared)
+  → RXI2 delivers 0x03: completion handler at 0x49C5F0
+```
+
+**Note:** The current emulator implementation queues 0x03 after TX DTC completion, which
+is consumed by state 6. The 0x13/0x11 handshake in states 2/3 and 7/8 appears to be for
+multi-packet transfers where DTC is re-enabled multiple times. The emulator currently
+bypasses this by executing the entire DTC transfer atomically.
 
 ## CyOS Radio Protocol (CYRF / CyDP)
 
@@ -340,6 +451,101 @@ conversations) is unknown.
 | Indoor | Up to 150 ft (46 m) [^4] |
 | Outdoor | Up to 500 ft (152 m) [^4] |
 | With retransmitters | Extended via mesh relay [^12] |
+
+## CyOS Radio Frame Format
+
+### TX DTC Buffer Layout
+
+CyOS assembles outgoing radio packets in RAM and sends them via TX DTC on SCI2.
+The TX DTC sends `frame_size + 1` bytes (51 for polls, 201 for scans). Captured
+from SCI2-DTC hex dumps with two emulators on `--radio lan`:
+
+#### 51-byte poll frame (0x30 command)
+
+```
+Offset  Example (hex)     Description
+------  ----------------  ------------------------------------------
+0-3     FF FF FF FF       RF preamble (clock sync for RF2915)
+4-7     4C 80 51 A3       Sync word (constant, RF2915 config)
+8       C2/C4             Channel byte (0xC0 | channel_number)
+9       01                Frame type: beacon/presence
+10-11   00 00 / 08 00     Flags (bit 3 set on some frames)
+12-15   varies            Per-packet varying data (CRC/sequence?)
+16      2A                Unknown (0x2A = 42 decimal, payload length?)
+17-19   00 00 00          Padding
+20+     "Dan\0own\0"      Username: overwrites fixed "unknown\0" buffer
+                          (3-char name: "Dan\0" + tail "own\0")
+                          (2-char name: "Sa\0" + tail "nown\0")
+28      7F                Unknown
+29      00                Unknown
+30-49   varies            Random/encrypted data or CRC (changes every TX)
+50      00                Trailing status byte (always 0x00)
+```
+
+#### 201-byte scan/chat frame (0xCF command)
+
+```
+Offset  Example (hex)     Description
+------  ----------------  ------------------------------------------
+0-7     FF FF FF FF       RF preamble + sync (same as poll)
+        4C 80 51 A3
+8       C4                Channel byte
+9       20                Frame type: data/message (0x20)
+10-11   00 00             Flags
+12-15   varies            Per-packet varying data
+16      18                Unknown
+17-19   00 10 02          Unknown
+20-21   00 00             Unknown
+22-23   varies            Unknown
+24      00                Unknown
+25      25                Unknown (0x25 = '%' = 37 decimal)
+26      0F                Length of message? (0x0F = 15 = len("Hi, everybody!"))
+27+     "Hi, everybody!"  Chat message text (null-terminated)
+27+N    00 00 ...         Zero padding to fill 200 bytes
+200     00                Trailing status byte
+```
+
+### RF Header Stripping
+
+The first 8 bytes (preamble + sync word) are for RF2915 programming:
+- **TX**: CyOS includes them so the AVR can configure the RF2915 transmitter
+- **RX**: The RF2915 detects preamble/sync automatically and strips them;
+  CyOS receives only the payload starting at byte 8
+
+For emulator-to-emulator networking, we strip the 8-byte RF header and the
+trailing status byte before forwarding over UDP. The receiving emulator
+delivers only the payload that CyOS's RX parser expects.
+
+### Channel Encoding
+
+Channel byte (offset 8 in TX buffer, offset 0 in RX payload): `0xC0 | channel`
+- 0xC2 = channel 2 (CyOS default after `01 02 02`)
+- 0xC4 = channel 4 (after `01 02 04`)
+- CyOS alternates between channels during scanning
+
+### Frame Types (offset 9 in TX buffer, offset 1 in RX payload)
+
+| Byte | Type | TX DTC Size | Command |
+|------|------|-------------|---------|
+| 0x01 | Beacon/presence | 51 bytes | 0x30 (poll) |
+| 0x20 | Data/message | 201 bytes | 0xCF (scan) or 0x30 |
+
+### RX Delivery
+
+CyOS reads received frames via per-byte RXI2 interrupts (NOT DTC):
+1. TX DTC completes → completeTxDtc queues 0x03 (ACK)
+2. CyOS reads 0x03 → completion handler
+3. completeTxDtc queues frame indicator: 0x32 (data) or 0xC8 (none)
+4. If 0x32: completeTxDtc pre-loads 50 bytes of frame data into rxQueue
+5. CyOS reads all 50 bytes one at a time via RXI2 ISR at PC=0x49BBF8
+6. DTCERF only has bit 6 (TXI2) set — CyOS never uses DTC for RX
+
+### Username Field
+
+The username at offset 20 (TX) / offset 12 (RX payload) uses an 8-byte fixed
+buffer initialized to "unknown\0". The username overwrites from the left:
+- "Dan" (3 chars): `44 61 6E 00 6F 77 6E 00` = "Dan\0own\0"
+- "Sa" (2 chars): `53 61 00 6E 6F 77 6E 00` = "Sa\0nown\0"
 
 ## V2 CyOS Boot Stall — Why Radio Matters
 
@@ -660,8 +866,8 @@ Based on the captured protocol data:
 
 1. ~~**SCI0 UART Protocol** — The exact byte-level protocol between H8S and AVR is
    completely undocumented. This is the single biggest blocker [^3].~~
-   **Partially resolved** — init command sequences captured (see above). Response
-   format still unknown; requires CyOS radio driver disassembly.
+   **Resolved** — init command sequences captured and response format reverse-engineered
+   via CyOS disassembly. Full 8-state RXI2 state machine documented above.
 
 2. **AVR Firmware Availability** — The AT90S2313 firmware is **not** in any available
    ROM dumps. The dump files in `roms/cybikov2/` are unrelated IE15 firmware [^6].
@@ -675,27 +881,53 @@ Based on the captured protocol data:
 4. **Channel Selection Algorithm** — How CyOS picks channels (fixed assignment?
    frequency hopping?) is unknown [^4].
 
-5. **Packet Format Details** — Beyond 50/200 byte frames with Manchester encoding
-   and sync bits, the header/payload/checksum structure is unknown [^4].
+5. ~~**Packet Format Details** — Beyond 50/200 byte frames with Manchester encoding
+   and sync bits, the header/payload/checksum structure is unknown [^4].~~
+   **Partially resolved** — TX DTC hex dumps reveal the frame structure. See
+   "CyOS Radio Frame Format" section below.
 
 6. **V2 CyOS Version Differences** — v1355 sends more SCI0 traffic (periodic `30 00`
    polling) than v1357 or v1358. Different versions may need different stub responses.
 
-7. **Response Format** — What bytes should the RadioCoProcessor return on SCI0 RDR
-   after receiving each init command? Requires disassembly of the radio driver.
+7. ~~**Response Format** — What bytes should the RadioCoProcessor return on SCI0 RDR
+   after receiving each init command? Requires disassembly of the radio driver.~~
+   **Resolved** — Full response code set documented: 0x00 (ACK for 3-byte commands),
+   0x03 (packet TX complete), 0x13 (DTC done), 0x11 (ready), 0x32 (data available),
+   0xC8 (no data). 2-byte commands produce no immediate response; ACK comes via DTC
+   completion path.
 
-8. **XT Radio Trigger** — XT v1508 defers radio init until a user-facing radio
-   feature is opened (Chat, Friend Finder, E-mail, multiplayer). The exact trigger
-   mechanism is unknown. To capture XT SCI0 traffic, the emulator needs GUI
-   interaction — headless mode cannot trigger radio features. The parental
-   permission dialog may also need to be bypassed (modify `settings.dat` byte 12
-   or navigate through the first-boot wizard with GUI).
+8. ~~**XT Radio Trigger** — XT v1508 defers radio init until a user-facing radio
+   feature is opened (Chat, Friend Finder, E-mail, multiplayer).~~
+   **Resolved** — XT uses SCI2 (not SCI0) for radio. Boot-time init is polled I/O
+   (channel command `01 02 02`). Feature-time radio uses interrupt-driven TXI2/RXI2
+   with DTC bulk transfers. Opening Chat triggers the full radio state machine with
+   periodic `30 00` polls and `CF 00` scan/beacon commands.
+
+9. ~~**RX DTC delivery** — When a remote packet arrives over the network, how does CyOS
+   expect to receive it?~~
+   **Resolved** — CyOS does NOT use DTC for RX. After receiving 0x32 (data available),
+   CyOS reads all 50 frame bytes one at a time via per-byte RXI2 interrupts (ISR at
+   PC=0x49BBF8 reads RDR, writes SSR=0x84). DTCERF only ever has bit 6 (TXI2) set,
+   never bit 7 (RXI2). Frame data is pre-loaded into RadioCoProcessor.rxQueue by
+   completeTxDtc() and delivered by tickSci2() one byte per instruction cycle.
+
+10. **Multi-packet DTC cycles** — States 2/3 and 7/8 implement a 0x13/0x11 handshake
+    that suggests DTC can be re-enabled multiple times within a single transaction.
+    The emulator currently executes entire DTC transfers atomically and skips this
+    handshake, which works for single-packet operations but may break for longer
+    transfers.
+
+11. **UDP multicast firewall** — Linux firewalld blocks UDP multicast delivery even
+    when packets are visible in Wireshark (captured on the raw socket before
+    firewall filtering). Users must open the port: `sudo firewall-cmd
+    --add-port=19200/udp`. Same-host multicast also requires explicit loopback
+    enable (`setLoopbackMode(false)`) and joining on all network interfaces.
 
 ## What Would Unlock Progress
 
 - ~~**Logic analyzer** on SCI0 lines of a real Cybiko during boot/messaging~~ —
-  emulator SCI0 logging now captures the H8S→AVR direction; AVR→H8S direction
-  requires stub implementation with trial-and-error or CyOS disassembly
+  emulator SCI0/SCI2 logging captures both directions; CyOS disassembly has revealed
+  the full protocol state machine
 - **SDR capture** of RF traffic between two Cybikos — reveals air interface protocol,
   modulation parameters, channel usage patterns
 - ~~**AT90S2313 firmware dump**~~ — confirmed not available in any ROM files
@@ -704,12 +936,15 @@ Based on the captured protocol data:
 - ~~**Different V2 ROM versions** (v1355, v1357, v1358) — some may be less aggressive
   about blocking boot on RF readiness~~ — **tested**: all three block, v1355 most
   verbose (periodic polling), v1357 most aggressive (stalls on first command)
-- **GUI-based XT SCI0 capture** — run the emulator with GUI, navigate to Chat or
-  Friend Finder, and check if CyOS v1508 finally initializes SCI0. The emulator
-  now has comprehensive SCI0 register logging (`[SCI0-REG]` in stderr) that will
-  capture any register access including SMR/BRR/SCR configuration writes.
-  Use `-Dcybiko.ramdump=/path` with `JAVA_TOOL_OPTIONS` to dump external RAM at
-  frame 300 for CyOS disassembly.
+- ~~**GUI-based XT SCI0 capture**~~ — **Resolved**: XT uses SCI2, not SCI0. Full
+  protocol captured and reverse-engineered. CyOS v1508 radio code disassembled at
+  0x49B9B4 (TX function), 0x49BBF8 (RXI2 handler), 0x49BD30 (TXI2 handler).
+- **RX packet delivery** — implement the RX DTC path so that packets received from
+  the network transport can be delivered to CyOS. Need to trace state 1 (poll result
+  0x32) to understand how CyOS sets up RX DTC and expects frame data.
+- **Chat protocol analysis** — capture and analyze Chat application protocol once
+  packet delivery works. May need CyID assignment, peer list management, and message
+  routing to be functional.
 
 ---
 
