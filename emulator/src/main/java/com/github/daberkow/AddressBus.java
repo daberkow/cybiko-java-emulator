@@ -93,6 +93,12 @@ public class AddressBus {
     private int sci0Rdr = 0;       // SCI0 receive data register (byte from radio)
     private boolean sci0Rdrf = false; // SCI0 receive data register full
 
+    // SCI2 interrupt-driven protocol state (XT radio)
+    private int sci2Scr = 0;           // Cached SCI2 SCR register value
+    private boolean sci2Tdre = true;   // SCI2 TDRE flag (transmitter data register empty)
+    private int sci2TxiDelay = 0;      // Countdown cycles until next TXI2 fires (0 = none pending)
+    private static final int SCI2_TXI_DELAY = 32; // Cycles between TXI2 fires (~byte transmission time)
+
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
     // typically re-enabled interrupts. Our synchronous DTC fires during the SCR write (while
@@ -140,6 +146,24 @@ public class AddressBus {
             dtcCompletionDelay--;
             if (dtcCompletionDelay == 0 && cpu != null) {
                 cpu.requestInterrupt(85);
+            }
+        }
+    }
+
+    /**
+     * Tick SCI2 interrupt generation. Call from main loop after each cpu.step().
+     * When a byte finishes "transmitting" (delay expires), TDRE goes high.
+     * If TIE is set in SCR, fires TXI2 (vector 90).
+     */
+    public void tickSci2() {
+        if (sci2TxiDelay > 0) {
+            sci2TxiDelay--;
+            if (sci2TxiDelay == 0) {
+                sci2Tdre = true;
+                // Fire TXI2 if TIE is enabled in SCR
+                if ((sci2Scr & 0x80) != 0 && cpu != null) {
+                    cpu.requestInterrupt(90); // TXI2
+                }
             }
         }
     }
@@ -420,7 +444,7 @@ public class AddressBus {
         // SCI SSR registers
         if (address == 0xFFFF7C) { // SCI0 SSR
             int ssr = SSR_TDRE | SSR_TEND;
-            if (radio != null && sci0Rdrf) ssr |= SSR_RDRF;
+            if (radio != null && radioSciChannel == 0 && sci0Rdrf) ssr |= SSR_RDRF;
             if (sci0RegLog.size() < 500) {
                 int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
                 if (pc != sci0SsrLastLogPc) { // deduplicate tight polling loops
@@ -437,7 +461,7 @@ public class AddressBus {
             }
             return SSR_TDRE | SSR_TEND;
         }
-        if (address == 0xFFFF7D && radio != null) { // SCI0 RDR
+        if (address == 0xFFFF7D && radio != null && radioSciChannel == 0) { // SCI0 RDR
             if (sci0RegLog.size() < 500) {
                 int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
                 sci0RegLog.add(String.format("R RDR=0x%02X PC=0x%06X", sci0Rdr, pc));
@@ -462,7 +486,8 @@ public class AddressBus {
             return sci0Rdr;
         }
         if (address == 0xFFFF8C) { // SCI2 SSR
-            int ssr = SSR_TDRE | SSR_TEND;
+            int ssr = SSR_TEND; // TEND always set for our purposes
+            if (sci2Tdre) ssr |= SSR_TDRE;
             if (radio != null && radioSciChannel == 2 && sci0Rdrf) ssr |= SSR_RDRF;
             if (sci2RegLog.size() < 500) {
                 int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
@@ -635,6 +660,13 @@ public class AddressBus {
                     int response = radio.transfer(value & 0xFF);
                     sci0Rdr = response;
                     sci0Rdrf = true;
+                    // SCI2: model TDRE — clear on TDR write, restore after transmission delay.
+                    // Always schedule TDRE restoration (real HW restores TDRE after byte TX
+                    // regardless of TIE). TIE only controls whether TXI2 interrupt fires.
+                    if (channel == 2) {
+                        sci2Tdre = false;
+                        sci2TxiDelay = SCI2_TXI_DELAY;
+                    }
                 }
                 // V1: SCI1 TDR writes go to SPI flash
                 if (channel == 1 && spiFlash != null) {
@@ -646,6 +678,16 @@ public class AddressBus {
                 // Detect DTC-driven SPI flash transfer setup
                 // CyOS uses DTC with SCI1 for bulk SPI flash reads/writes
                 executeSci1Dtc(value);
+            }
+            if (reg == 2 && channel == 2) { // SCI2 SCR write
+                int oldScr = sci2Scr;
+                sci2Scr = value & 0xFF;
+                // If TIE just enabled and TDRE is already set, schedule first TXI2
+                boolean tieEnabled = (sci2Scr & 0x80) != 0;
+                boolean tieWasOff = (oldScr & 0x80) == 0;
+                if (tieEnabled && sci2Tdre && (tieWasOff || sci2TxiDelay == 0)) {
+                    sci2TxiDelay = SCI2_TXI_DELAY;
+                }
             }
             onChipRam.write8(onChipOffset(address), value);
             return;

@@ -260,6 +260,7 @@ public class CybikoEmulator {
 
                 cpu.step();
                 bus.tickDtcCompletion();
+                bus.tickSci2();
                 totalSteps++;
 
                 if (totalSteps >= maxSteps) break;

@@ -51,11 +51,14 @@ class BootIntegrationTest {
             for (int ch = 0; ch < 6; ch++) r16[ch] = t16[ch].isRunning();
 
             // Execute one frame worth of cycles with timer ticks
+            AddressBus bus = emu.getBus();
             for (int i = 0; i < 307200; i++) {
                 if (r8_0) t8_0.tick();
                 if (r8_1) t8_1.tick();
                 for (int ch = 0; ch < 6; ch++) if (r16[ch]) t16[ch].tick();
                 cpu.step();
+                bus.tickDtcCompletion();
+                bus.tickSci2();
             }
 
             CRC32 crc = new CRC32();
