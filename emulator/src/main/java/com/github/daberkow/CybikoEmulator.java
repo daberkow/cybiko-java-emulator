@@ -372,6 +372,8 @@ public class CybikoEmulator {
             System.out.println("  --remote-display <port> - Enable remote display TCP server on port");
             System.out.println("  --radio <lan|sdr>  - Enable radio (lan=UDP multicast, sdr=TCP bridge)");
             System.out.println("  --radio-id <n>     - Set radio device ID (default: random)");
+            System.out.println("  --sdr-host <ip>    - SDR bridge host (default: localhost)");
+            System.out.println("  --sdr-port <port>  - SDR bridge port (default: 19201)");
             System.exit(1);
         }
 
@@ -382,6 +384,8 @@ public class CybikoEmulator {
         int remotePort = 0;
         String radioMode = null;
         int radioDeviceId = 0;
+        String sdrHost = "localhost";
+        int sdrPort = 19201;
         MachineConfig.MachineType machineType = MachineConfig.MachineType.XT;
 
         // Parse arguments
@@ -418,6 +422,8 @@ public class CybikoEmulator {
                 case "--remote-display" -> { if (i + 1 < args.length) remotePort = Integer.parseInt(args[++i]); }
                 case "--radio" -> { if (i + 1 < args.length) radioMode = args[++i].toLowerCase(); }
                 case "--radio-id" -> { if (i + 1 < args.length) radioDeviceId = Integer.parseInt(args[++i]); }
+                case "--sdr-host" -> { if (i + 1 < args.length) sdrHost = args[++i]; }
+                case "--sdr-port" -> { if (i + 1 < args.length) sdrPort = Integer.parseInt(args[++i]); }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
@@ -510,6 +516,31 @@ public class CybikoEmulator {
         // Set up audio
         if (!mute) {
             emu.setSpeaker(new SpeakerOutput(config.clockHz));
+        }
+
+        // Wire radio transport
+        if ("lan".equals(radioMode)) {
+            try {
+                int id = radioDeviceId != 0 ? radioDeviceId
+                       : Math.abs(java.util.UUID.randomUUID().hashCode());
+                UdpMulticastTransport udp = new UdpMulticastTransport(id);
+                udp.start();
+                emu.getRadio().setTransport(udp);
+                Runtime.getRuntime().addShutdownHook(new Thread(udp::close));
+            } catch (IOException e) {
+                System.err.println("Warning: UDP multicast not available: " + e.getMessage());
+            }
+        } else if ("sdr".equals(radioMode)) {
+            try {
+                int id = radioDeviceId != 0 ? radioDeviceId
+                       : Math.abs(java.util.UUID.randomUUID().hashCode());
+                SdrTransport sdr = new SdrTransport(id, sdrHost, sdrPort);
+                sdr.start();
+                emu.getRadio().setTransport(sdr);
+                Runtime.getRuntime().addShutdownHook(new Thread(sdr::close));
+            } catch (IOException e) {
+                System.err.println("Warning: SDR bridge not available: " + e.getMessage());
+            }
         }
 
         // Set up renderer and run
