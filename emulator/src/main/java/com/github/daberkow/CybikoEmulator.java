@@ -232,13 +232,19 @@ public class CybikoEmulator {
                 // V2: auto-resolve set_task_state for services that wait on
                 // unimplemented hardware (RF, etc). Phased: resolve base services
                 // always, all non-RF services after frame 1200.
-                // RF (0x202CB2) is NEVER resolved — causes failed HW init.
+                // RF (0x202CB2) is only resolved when radio is initialized with
+                // a transport (i.e., user passed --radio); otherwise it stays
+                // blacklisted to avoid failed HW init that permanently blocks boot.
                 if (v2ServiceStub && cpu.getPC() == V2_SET_TASK_STATE_ADDR) {
                     int obj = cpu.getER(0);
                     int expectedByte = cpu.getER(1) & 0xFF;
                     int currentByte = bus.read8(obj + V2_STATE_OFFSET);
                     boolean isBase = (obj == 0x208B84 || obj == 0x203512);
-                    boolean isLate = (obj != V2_RF_OBJ && frameCounter >= 1200);
+                    boolean isRf = (obj == V2_RF_OBJ);
+                    boolean rfAllowed = isRf && radio != null && radio.isInitialized()
+                            && radio.getTransport() != null && frameCounter >= 1200;
+                    boolean nonRfAllowed = !isRf && frameCounter >= 1200;
+                    boolean isLate = rfAllowed || nonRfAllowed;
                     if ((isBase || isLate) && currentByte != expectedByte) {
                         bus.write8(obj + V2_STATE_OFFSET, expectedByte);
                         cpu.setCCR(cpu.getCCR() & ~0x80);
