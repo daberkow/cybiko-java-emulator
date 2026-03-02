@@ -24,6 +24,10 @@ Learning project intended for eventual port to C.
 | `--nvram <file>` | Load/save persistent NVRAM (CFS filesystem + CyOS state) |
 | `--app <file.app>` | Add .app file to NVRAM before booting (multiple allowed) |
 | `--list-apps` | List apps in NVRAM and exit |
+| `--radio <lan\|sdr>` | Enable radio (lan=UDP multicast, sdr=TCP bridge) |
+| `--radio-id <n>` | Set radio device ID (default: random) |
+| `--sdr-host <ip>` | SDR bridge host (default: localhost) |
+| `--sdr-port <port>` | SDR bridge port (default: 19201) |
 
 ### NVRAM & App Loading
 ```bash
@@ -55,6 +59,19 @@ ROM files:
 - Xtreme: `src/main/resources/cybikoxt/cyrom150.bin` + `cyos_v1508.bin` (from MAME cybikoxt.zip)
 - Classic V1: `cyrom112.bin` + `flash_v1246.bin` (from MAME cybiko.zip)
 App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice.app`).
+
+### Radio Networking
+```bash
+# Two emulators on LAN
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --radio lan --radio-id 1"
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --radio lan --radio-id 2"
+
+# SDR bridge (requires GNU Radio server)
+./gradlew run --args="cyrom150.bin cyos_v1508.bin --radio sdr --sdr-host 192.168.1.50"
+
+# V2 with radio (may help boot further)
+./gradlew run --args="--machine v2 <bootrom> <flash> --radio lan"
+```
 
 ## Hardware Reference
 
@@ -166,6 +183,17 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
   MachineConfig to select XT (15-col, Fn+letter numbers) or V1 (9-col, dedicated numbers)
   keyboard layout. Queue-based Fn+letter injection for XT number keys. Minimum key hold
   time (3 frames) for all keys.
+- `RadioCoProcessor` - AVR radio co-processor stub (AT90S2313). Emulates SCI0 UART
+  protocol with the H8S CPU. 3-byte command protocol (header + cmd + param), responds
+  with ACKs. Tracks initialization state and current radio channel. Connected via
+  AddressBus SCI0 registers (0xFFFF78-0xFFFF7E).
+- `RadioTransport` - Interface for radio network layer. Implementations:
+  `UdpMulticastTransport` (LAN via multicast 239.0.0.42:19200),
+  `SdrTransport` (TCP bridge to GNU Radio on localhost:19201).
+- `UdpMulticastTransport` - UDP multicast for LAN-based radio. Wire format:
+  [4B device ID][1B channel][payload]. TTL=1, daemon listener thread, self-filtering.
+- `SdrTransport` - TCP bridge client for GNU Radio SDR integration. Wire format:
+  [2B length][1B channel][payload]. Connects to configurable host:port.
 
 ## MAME Reference
 Hardware details derived from MAME source at `../mame/`.
@@ -334,6 +362,10 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - VRAM CRC32 hash and frame timing in STATUS log
 - Frame time ~4ms (24% of 16.7ms budget), JIT-optimized after first second
 - No unimplemented opcodes in the current execution path
+- Radio co-processor stub handles SCI0 UART protocol (V1/V2 init commands)
+- LAN radio networking via UDP multicast (--radio lan)
+- SDR TCP bridge stub for GNU Radio integration (--radio sdr)
+- V2 RF object blacklist conditionally relaxed when radio transport is connected
 
 ## Keyboard Matrix
 
