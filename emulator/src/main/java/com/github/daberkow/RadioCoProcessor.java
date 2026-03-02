@@ -53,7 +53,10 @@ public class RadioCoProcessor {
             cmdPos = 0;
         }
 
-        return rxQueue.isEmpty() ? -1 : rxQueue.poll();
+        // Always return a response byte (0xFF for intermediate command bytes,
+        // or queued response for final command byte). This matches real SPI
+        // full-duplex behavior where every TX byte generates an RX byte.
+        return rxQueue.isEmpty() ? 0xFF : rxQueue.poll();
     }
 
     /** Returns true if there are buffered response bytes waiting to be read. */
@@ -161,8 +164,12 @@ public class RadioCoProcessor {
                 }
             }
         } else if (header == 0x30) {
-            // Polling command (V2 periodic check for received packets)
-            rxQueue.add(0x00); // No data available
+            // Polling command — check for received frames
+            if (!receivedFrames.isEmpty()) {
+                rxQueue.add(0x32); // Data available
+            } else {
+                rxQueue.add(0xC8); // No data available
+            }
         } else {
             // Unknown header, ACK to avoid blocking caller
             rxQueue.add(0x00);

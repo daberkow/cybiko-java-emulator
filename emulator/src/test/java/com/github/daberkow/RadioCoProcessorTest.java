@@ -8,15 +8,15 @@ class RadioCoProcessorTest {
     @Test void emptyRadioHasNoData() {
         RadioCoProcessor radio = new RadioCoProcessor();
         assertFalse(radio.hasData());
-        assertEquals(-1, radio.transfer(0x00)); // Partial command, no response yet
+        assertEquals(0xFF, radio.transfer(0x00)); // Partial command, 0xFF idle byte
     }
 
     @Test void threeByteCommandGetsAck() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        assertEquals(-1, radio.transfer(0x01)); // byte 1 of 3
-        assertEquals(-1, radio.transfer(0x04)); // byte 2 of 3
-        int response = radio.transfer(0x00);    // byte 3 of 3, triggers response
-        assertEquals(0x00, response);           // ACK
+        assertEquals(0xFF, radio.transfer(0x01)); // byte 1 of 3, 0xFF idle
+        assertEquals(0xFF, radio.transfer(0x04)); // byte 2 of 3, 0xFF idle
+        int response = radio.transfer(0x00);      // byte 3 of 3, triggers response
+        assertEquals(0x00, response);             // ACK
         assertTrue(radio.isInitialized());
     }
 
@@ -66,7 +66,7 @@ class RadioCoProcessorTest {
         radio.transfer(0x30);
         radio.transfer(0x00);
         int response = radio.transfer(0x00);
-        assertEquals(0x00, response); // No data available
+        assertEquals(0xC8, response); // No data available (0xC8 = empty)
     }
 
     @Test void unknownHeaderAcks() {
@@ -87,9 +87,9 @@ class RadioCoProcessorTest {
 
     @Test void partialCommandNoResponse() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        assertEquals(-1, radio.transfer(0x01)); // first byte
+        assertEquals(0xFF, radio.transfer(0x01)); // first byte, 0xFF idle
         assertFalse(radio.hasData());
-        assertEquals(-1, radio.transfer(0x04)); // second byte
+        assertEquals(0xFF, radio.transfer(0x04)); // second byte, 0xFF idle
         assertFalse(radio.hasData());
     }
 

@@ -633,13 +633,8 @@ public class AddressBus {
                 }
                 if (channel == radioSciChannel && radio != null) {
                     int response = radio.transfer(value & 0xFF);
-                    if (response >= 0) {
-                        sci0Rdr = response;
-                        sci0Rdrf = true;
-                    } else if (radio.hasData()) {
-                        sci0Rdr = radio.read();
-                        sci0Rdrf = true;
-                    }
+                    sci0Rdr = response;
+                    sci0Rdrf = true;
                 }
                 // V1: SCI1 TDR writes go to SPI flash
                 if (channel == 1 && spiFlash != null) {
