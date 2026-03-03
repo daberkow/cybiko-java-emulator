@@ -235,9 +235,11 @@ class RadioCoProcessorTest {
         int indicator = radio.completeTxDtc();
         assertEquals(0xC8, indicator); // No received frames → null indicator
         assertFalse(radio.hasData()); // completeTxDtc doesn't queue anything
-        // Simulate AddressBus delivering the indicator after TXI2 ISR
+        // Simulate AddressBus deferred delivery: 0x03 + indicator
+        radio.queueResponse(0x03);
         radio.queueResponse(indicator);
         assertTrue(radio.hasData());
+        assertEquals(0x03, radio.read());
         assertEquals(0xC8, radio.read());
         assertFalse(radio.hasData());
         // 3-byte channel change still works
@@ -255,9 +257,12 @@ class RadioCoProcessorTest {
         assertEquals(0x32, indicator); // Data available
         assertFalse(radio.hasData()); // Nothing queued by completeTxDtc
 
-        // Simulate AddressBus delivering indicator after TXI2 ISR
+        // Simulate AddressBus deferred delivery: 0x03 (packet ACK) + indicator
+        // This matches the real protocol: state 6 consumes 0x03, state 1 consumes indicator
+        radio.queueResponse(0x03);
         radio.queueResponse(indicator);
-        assertEquals(0x32, radio.read());
+        assertEquals(0x03, radio.read()); // State 6: packet ACK
+        assertEquals(0x32, radio.read()); // State 1: frame indicator
         assertFalse(radio.hasData());
 
         // Frame data delivered separately via prepareRxFrame (simulates RX DTC)
@@ -304,24 +309,104 @@ class RadioCoProcessorTest {
         assertFalse(radio.hasData());
     }
 
-    @Test void prepareRxNullReadDoesNotConsumeFrames() {
+    @Test void prepareRxLargeFrameDeliveredAt200() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        byte[] frame = new byte[]{0x42, 0x43};
+        // 192-byte scan/chat frame (larger than 50 bytes)
+        byte[] frame = new byte[192];
+        frame[0] = (byte) 0xC4; // channel byte
+        frame[1] = 0x20;        // scan type
+        frame[18] = 0x0F;       // message length
+        System.arraycopy("Hi, everybody!".getBytes(), 0, frame, 19, 14);
         radio.queueReceivedFrame(frame);
-        // Null read (count=200) should NOT consume the queued frame
+
+        // completeTxDtc returns 0xC8 for large frames
+        int indicator = radio.completeTxDtc();
+        assertEquals(0xC8, indicator);
+
+        // prepareRxFrame(200) delivers the large frame
         radio.prepareRxFrame(200);
-        // Drain the 200 bytes of 0xFF
+        assertEquals(0xC4, radio.read()); // channel byte
+        assertEquals(0x20, radio.read()); // scan type
+        // Skip to message at offset 18
+        for (int i = 2; i < 18; i++) radio.read();
+        assertEquals(0x0F, radio.read()); // message length
+        // Remaining 181 bytes (frame data + padding)
+        for (int i = 19; i < 200; i++) radio.read();
+        assertFalse(radio.hasData());
+    }
+
+    @Test void prepareRxNullReadNoFrame() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // No frame queued — 200-byte null read fills with 0xFF
+        radio.prepareRxFrame(200);
         for (int i = 0; i < 200; i++) {
-            radio.read();
-        }
-        // Frame should still be available for a real read
-        radio.prepareRxFrame(50);
-        assertEquals(0x42, radio.read());
-        assertEquals(0x43, radio.read());
-        // Remaining 48 bytes are 0xFF padding
-        for (int i = 0; i < 48; i++) {
             assertEquals(0xFF, radio.read());
         }
         assertFalse(radio.hasData());
+    }
+
+    @Test void smallFrameGets0x32LargeFrameGets0xC8() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Small frame (42 bytes, like a poll beacon)
+        radio.queueReceivedFrame(new byte[42]);
+        assertEquals(0x32, radio.completeTxDtc());
+
+        // Large frame (192 bytes, like a scan/chat)
+        radio.queueReceivedFrame(new byte[192]);
+        // First frame is still small (peek returns first)
+        assertEquals(0x32, radio.completeTxDtc());
+
+        // Consume the small frame
+        radio.prepareRxFrame(50);
+        for (int i = 0; i < 50; i++) radio.read();
+
+        // Now the large frame is next
+        assertEquals(0xC8, radio.completeTxDtc());
+    }
+
+    @Test void handleTransmitUsesFrameChannelNotCurrentChannel() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Track what channel sendPacket is called with
+        final int[] sentChannel = {-1};
+        final byte[][] sentData = {null};
+        RadioTransport mockTransport = new RadioTransport() {
+            @Override public void sendPacket(byte[] data, int channel) {
+                sentData[0] = data;
+                sentChannel[0] = channel;
+            }
+            @Override public void setPacketListener(PacketListener l) {}
+            @Override public void setChannel(int ch) {}
+            @Override public void start() {}
+            @Override public void close() {}
+            @Override public int getDeviceId() { return 0x42; }
+        };
+        radio.setTransport(mockTransport);
+
+        // Set currentChannel to 2
+        radio.transfer(0x01);
+        radio.transfer(0x02);
+        radio.transfer(0x02);
+        assertEquals(2, radio.getCurrentChannel());
+
+        // Build a TX DTC frame with channel byte 0xC4 (channel 4)
+        // Format: 8-byte RF header + payload + 1-byte trailing status
+        byte[] txData = new byte[51]; // 8 + 42 + 1
+        // RF header (preamble + sync) — stripped by handleTransmit
+        txData[0] = (byte) 0xFF; txData[1] = (byte) 0xFF;
+        txData[2] = (byte) 0xFF; txData[3] = (byte) 0xFF;
+        txData[4] = 0x4C; txData[5] = (byte) 0x80;
+        txData[6] = 0x51; txData[7] = (byte) 0xA3;
+        // Payload byte 0: channel byte 0xC4 = channel 4
+        txData[8] = (byte) 0xC4;
+        // Trailing status byte
+        txData[50] = 0x00;
+
+        radio.handleTransmit(txData);
+
+        // Transport should have been called with channel 4 (from frame content),
+        // NOT channel 2 (from currentChannel)
+        assertEquals(4, sentChannel[0]);
+        assertNotNull(sentData[0]);
+        assertEquals((byte) 0xC4, sentData[0][0]);
     }
 }

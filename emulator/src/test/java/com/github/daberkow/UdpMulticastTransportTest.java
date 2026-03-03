@@ -98,8 +98,8 @@ class UdpMulticastTransportTest {
         }
     }
 
-    /** Packets on a different channel than the listener's channel are discarded. */
-    @Test void wrongChannelIsFiltered() throws Exception {
+    /** Packets on any channel are delivered — CyOS handles channel filtering. */
+    @Test void crossChannelPacketsDelivered() throws Exception {
         UdpMulticastTransport a = null;
         UdpMulticastTransport b = null;
         try {
@@ -115,14 +115,19 @@ class UdpMulticastTransportTest {
             }
 
             CountDownLatch latch = new CountDownLatch(1);
+            AtomicInteger receivedChannel = new AtomicInteger(-1);
             b.setChannel(5);
-            b.setPacketListener((data, channel, senderId) -> latch.countDown());
+            b.setPacketListener((data, channel, senderId) -> {
+                receivedChannel.set(channel);
+                latch.countDown();
+            });
 
-            // Send on channel 3 -- B is listening on channel 5
+            // Send on channel 3 -- B has currentChannel=5, but transport delivers all
             a.sendPacket(new byte[]{(byte) 0xAA}, 3);
 
-            assertFalse(latch.await(500, TimeUnit.MILLISECONDS),
-                    "Transport should not deliver packets from a different channel");
+            assertTrue(latch.await(2, TimeUnit.SECONDS),
+                    "Transport should deliver packets regardless of channel");
+            assertEquals(3, receivedChannel.get());
         } finally {
             if (a != null) a.close();
             if (b != null) b.close();

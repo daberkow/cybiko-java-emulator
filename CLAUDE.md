@@ -199,11 +199,14 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
   channel, config), 0x30/0xCF=2 bytes (poll, scan), all others=2 bytes. Two call paths:
   `transfer()` for SCI0 full-duplex (V1/V2), `receive()` for SCI2 async UART (XT).
   3-byte commands queue ACK (0x00) responses; 2-byte commands produce no immediate
-  response (ACK comes via DTC completion path). `completeTxDtc()` queues TX ACK
-  (0x03) and frame indicator (0x32/0xC8). Frame data is delivered via RX DTC: CyOS
-  sets DTCERF bit 7 after receiving 0x32/0xC8, and AddressBus bulk-transfers 50/200
-  bytes to a RAM buffer via `prepareRxFrame()`. A dummy completion byte triggers the
-  RXI2 ISR in state 4 for frame delivery to the CyOS application layer. TX DTC data
+  response (ACK comes via DTC completion path). `completeTxDtc()` returns
+  frame size indicator: 0x32 (50) for small frames, 0xC8 (200) for large frames
+  or no data. After TX DTC, AddressBus defers delivery of TWO bytes via DTCERF
+  bit 6 clear: 0x03 (packet ACK for state 6→completion→state 1) then the
+  indicator (for state 1→RX DTC setup). Frame data is delivered via RX DTC:
+  CyOS sets DTCERF bit 7 after receiving indicator, and AddressBus bulk-transfers
+  50/200 bytes to a RAM buffer via `prepareRxFrame()`. A dummy completion byte
+  triggers the RXI2 ISR in state 4 for frame delivery to the CyOS application layer. TX DTC data
   has 8-byte RF header (4B preamble + 4B sync word) stripped before forwarding to peer
   emulators (RF2915 strips these on receive). Connected via SCI0 (V1/V2) or SCI2 (XT)
   with TXI2/RXI2 interrupt support. Both TX DTC (DTCERF bit 6) and RX DTC (bit 7)
@@ -366,16 +369,25 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   bypass startup waits. The RF object (0x202CB2) must never be resolved via stub —
   causes failed HW init. See V2 Investigation below. MAME also cannot fully boot V2
   CyOS with these ROMs.
-- **XT radio RX DTC implemented, peer discovery pending verification**: CyOS v1508
+- **XT radio RX DTC and frame exchange working between emulators**: CyOS v1508
   uses SCI2 for radio with hardware DTC for both TX and RX. TX DTC sends outgoing
   frames (51/201 bytes). RX DTC bulk-transfers 50/200 bytes from SCI2 RDR to a RAM
-  buffer (DTCERF bit 7). Previous per-byte RXI2 delivery caused state machine
-  corruption (state 4 completed after 1 byte instead of 50). Now: completeTxDtc()
-  queues [0x03, 0x32/0xC8] indicator only, then CyOS sets up RX DTC which
-  executeSci2Dtc() handles via prepareRxFrame(). A dummy completion byte triggers
-  the RXI2 ISR for state 4/5 frame delivery. The 8-byte RF header (preamble + sync
-  word) is stripped before network forwarding. Chat peer discovery not yet verified
-  with GUI — requires two emulators with Chat open. See
+  buffer (DTCERF bit 7). After TX DTC completion, AddressBus defers delivery of
+  TWO bytes when TXI2 ISR clears DTCERF bit 6: 0x03 (packet ACK, consumed by
+  state 6 → completion → state 1) then the frame indicator (0x32/0xC8, consumed
+  by state 1 → RX DTC setup). The 0x03 is critical — without it, the indicator
+  gets consumed by state 6 instead of state 1, and CyOS never sets up RX DTC.
+  Frame size indicator matches frame type: 0x32 (50 bytes) for poll beacons
+  (≤50 bytes), 0xC8 (200 bytes) for scan/chat frames (>50 bytes) or no data.
+  CyOS distinguishes "large frame" from "no data" by content (real data vs 0xFF).
+  Short TX DTC frames (4-byte AVR commands like `01 03 00 00`) are filtered in
+  handleTransmit() to prevent 0-byte payload poisoning. handleTransmit() extracts
+  the channel from the frame content's channel byte (`payload[0] & 0x3F`) instead
+  of using `currentChannel`, because CyOS channel-hops (ch=2↔ch=4) and may switch
+  channels between preparing the frame and firing the TX DTC. MRA-based address
+  mode in RX DTC: 0x20=dest increment (real data), 0x00=dest fixed (discard on
+  channel mismatch). Two-emulator headless test confirms bidirectional frame
+  exchange with correct channel matching. Chat peer discovery pending GUI testing. See
   [docs/rf2915-research.md](docs/rf2915-research.md) for decoded frame format.
 
 ## Current Status

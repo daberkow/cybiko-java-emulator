@@ -18,8 +18,9 @@ import java.nio.ByteBuffer;
  * </pre>
  *
  * <p>Packets from this device (matching device ID) are filtered out on receive.
- * Packets on a different channel than the current listening channel are also
- * discarded. TTL is set to 1 to keep traffic LAN-only.
+ * Channel filtering is NOT done at the transport level — CyOS handles it via
+ * its own protocol layer (state=5 / MRA=0x00 discard for mismatched channels).
+ * TTL is set to 1 to keep traffic LAN-only.
  */
 public class UdpMulticastTransport implements RadioTransport {
     static final String DEFAULT_GROUP = "239.0.0.42";
@@ -148,13 +149,13 @@ public class UdpMulticastTransport implements RadioTransport {
                 int senderId = bb.getInt();
                 int channel = bb.get() & 0xFF;
 
-                // Filter own packets and wrong channel
+                // Filter own packets only. Channel filtering is handled by CyOS
+                // at the protocol layer (state=5 / MRA=0x00 discard for mismatched
+                // channels). We don't filter by channel here because CyOS channel-hops
+                // during peer discovery (ch=2↔ch=4) and UDP latency causes frames to
+                // arrive after the channel has already changed. On real hardware,
+                // RF signals arrive in microseconds; UDP takes milliseconds.
                 if (senderId == deviceId) continue;
-                if (channel != currentChannel) {
-                    System.err.printf("[RADIO-UDP] RX filtered: sender=0x%08X ch=%d (listening on %d)%n",
-                            senderId, channel, currentChannel);
-                    continue;
-                }
 
                 byte[] payload = new byte[pkt.getLength() - HEADER_SIZE];
                 bb.get(payload);

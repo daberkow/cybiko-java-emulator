@@ -347,10 +347,17 @@ When CyOS sends a radio packet (poll, scan, or data transmission), the full sequ
 3. CyOS enables TXI2 DTC (DTCERF |= 0x40) and TIE (SCR bit 7)
 4. DTC autonomously transfers packet data bytes to TDR, one per TXI2 interrupt
 5. When DTC count reaches 0, TX DTC completes
-6. Emulator: executes entire DTC transfer immediately, queues 0x03 (packet ACK)
-7. TXI2 fires naturally when TDRE goes high — CyOS TXI2 ISR advances state machine
-8. RXI2 delivers 0x03 ACK — CyOS state machine reaches completion
+6. Emulator: executes entire DTC transfer immediately, stores indicator (0x32/0xC8)
+7. TXI2 fires — CyOS TXI2 ISR: state 2→6, clears DTCERF bit 6 (BCLR #6)
+8. DTCERF handler delivers deferred response: 0x03 (packet ACK) + indicator
+9. RXI2 delivers 0x03 — state 6 completion handler → state 1
+10. RXI2 delivers indicator (0x32/0xC8) — state 1 sets up RX DTC
 ```
+
+**Critical: two-byte deferred delivery.** The AVR sends 0x03 (packet ACK) THEN the frame
+size indicator (0x32 or 0xC8) after TX DTC completion. Both must be delivered after the
+TXI2 ISR transitions CyOS from state 2→6. Without 0x03, the indicator is consumed by
+state 6 instead of state 1, and CyOS never sets up the RX DTC for the received frame.
 
 The 51-byte transfer corresponds to a poll command (0x30), and 201-byte transfer to a
 scan/beacon command (0xCF). These are raw packet data, **not** radio commands — the DTC
@@ -364,7 +371,7 @@ based on state via a jump table at 0x4823FC:
 
 | State | Jump Target | Expected Byte | Action |
 |-------|------------|---------------|--------|
-| 1 | 0x49BC7A | 0x32 or 0xC8 | Poll result (data available / no data) |
+| 1 | 0x49BC7A | 0x32 or 0xC8 | Frame size indicator: 0x32=50B (poll beacon), 0xC8=200B (scan/chat or no data) |
 | 2 | 0x49BC2E | 0x13 | TX DTC done ACK → state 3 |
 | 3 | 0x49BC54 | 0x11 | Ready → state 2 (re-enable DTC) |
 | 4 | 0x49BC92 | any | Handler with arg=0 |
@@ -513,8 +520,11 @@ The first 8 bytes (preamble + sync word) are for RF2915 programming:
   CyOS receives only the payload starting at byte 8
 
 For emulator-to-emulator networking, we strip the 8-byte RF header and the
-trailing status byte before forwarding over UDP. The receiving emulator
-delivers only the payload that CyOS's RX parser expects.
+trailing status byte before forwarding over UDP. The UDP transport channel
+is extracted from the frame content's channel byte (`payload[0] & 0x3F`),
+not from `RadioCoProcessor.currentChannel`, because CyOS channel-hops and
+may change channels between preparing the frame and firing the TX DTC.
+The receiving emulator delivers only the payload that CyOS's RX parser expects.
 
 ### Channel Encoding
 
@@ -532,13 +542,20 @@ Channel byte (offset 8 in TX buffer, offset 0 in RX payload): `0xC0 | channel`
 
 ### RX Delivery
 
-CyOS reads received frames via per-byte RXI2 interrupts (NOT DTC):
-1. TX DTC completes → completeTxDtc queues 0x03 (ACK)
-2. CyOS reads 0x03 → completion handler
-3. completeTxDtc queues frame indicator: 0x32 (data) or 0xC8 (none)
-4. If 0x32: completeTxDtc pre-loads 50 bytes of frame data into rxQueue
-5. CyOS reads all 50 bytes one at a time via RXI2 ISR at PC=0x49BBF8
-6. DTCERF only has bit 6 (TXI2) set — CyOS never uses DTC for RX
+CyOS uses DTC for both TX and RX on SCI2 (XT):
+1. TX DTC completes → TXI2 ISR fires (vector 90, handler at 0x49BEE4)
+2. TXI2 ISR: clears TIE, clears DTCERF bit 6 → deferred delivery of 0x03 + indicator
+3. State 6 receives 0x03 (packet ACK) → completion handler → state 1
+4. State 1 receives indicator (0x32 or 0xC8) → setup_rx_dtc
+5. CyOS state 1 processes indicator: 0x32 → setup_rx_dtc(data), 0xC8 → setup_rx_dtc(null)
+5. setup_rx_dtc: checks channel match (obj+0x335B vs obj+0x335C), sets up RX DTC
+   - Channel match: state→4, MRA=0x20 (dest increment), count=50 (data) or 200 (null)
+   - Channel mismatch: state→5, MRA=0x00 (dest fixed, discard)
+6. DTCERF bit 7 set → RX DTC bulk-transfers count bytes from SCI2 RDR to RAM buffer
+7. Completion RXI2 fires → state 4 handler calls frame_complete → delivers to app layer
+
+Short TX DTC frames (e.g. 4-byte init command 01 03 00 00) are AVR commands,
+not radio packets — they are not forwarded over the network.
 
 ### Username Field
 
@@ -892,9 +909,9 @@ Based on the captured protocol data:
 7. ~~**Response Format** — What bytes should the RadioCoProcessor return on SCI0 RDR
    after receiving each init command? Requires disassembly of the radio driver.~~
    **Resolved** — Full response code set documented: 0x00 (ACK for 3-byte commands),
-   0x03 (packet TX complete), 0x13 (DTC done), 0x11 (ready), 0x32 (data available),
-   0xC8 (no data). 2-byte commands produce no immediate response; ACK comes via DTC
-   completion path.
+   0x03 (packet TX complete), 0x13 (DTC done), 0x11 (ready), 0x32 (50-byte frame
+   available), 0xC8 (200-byte frame available or no data). 2-byte commands produce
+   no immediate response; ACK comes via DTC completion path.
 
 8. ~~**XT Radio Trigger** — XT v1508 defers radio init until a user-facing radio
    feature is opened (Chat, Friend Finder, E-mail, multiplayer).~~
@@ -905,11 +922,13 @@ Based on the captured protocol data:
 
 9. ~~**RX DTC delivery** — When a remote packet arrives over the network, how does CyOS
    expect to receive it?~~
-   **Resolved** — CyOS does NOT use DTC for RX. After receiving 0x32 (data available),
-   CyOS reads all 50 frame bytes one at a time via per-byte RXI2 interrupts (ISR at
-   PC=0x49BBF8 reads RDR, writes SSR=0x84). DTCERF only ever has bit 6 (TXI2) set,
-   never bit 7 (RXI2). Frame data is pre-loaded into RadioCoProcessor.rxQueue by
-   completeTxDtc() and delivered by tickSci2() one byte per instruction cycle.
+   **Resolved** — CyOS uses DTC for both TX and RX. After TX DTC completes, a frame
+   size indicator (0x32=50 bytes for poll beacons, 0xC8=200 bytes for scan/chat frames
+   or no data) is delivered via deferred RXI2. CyOS sets up RX DTC (DTCERF bit 7) to
+   bulk-transfer the indicated number of bytes from SCI2 RDR to a RAM buffer. CyOS
+   distinguishes "large frame" from "no data" by content (real data starts with channel
+   byte 0xC0+, null reads are all 0xFF). Channel mismatch uses MRA=0x00 (dest fixed,
+   state 5) to discard without corrupting memory.
 
 10. **Multi-packet DTC cycles** — States 2/3 and 7/8 implement a 0x13/0x11 handshake
     that suggests DTC can be re-enabled multiple times within a single transaction.

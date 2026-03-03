@@ -824,16 +824,21 @@ public class AddressBus {
             if ((value & 0xC0) != 0) {
                 executeSci2Dtc(sci2Scr);
             }
-            // Deferred indicator delivery: when TXI2 ISR clears DTCERF bit 6
-            // (BCLR #6 at 0x49BEEC), queue the frame indicator. This happens
-            // INSIDE the TXI2 ISR (I-flag set), so RXI2 won't fire until after
-            // the ISR completes (RTE), by which point state has transitioned to 1.
-            // We can't use the SCR TIE-clear transition because the timer callback
-            // also clears TIE (at 0x49BD60) BEFORE the TXI2 ISR runs.
+            // Deferred delivery: when TXI2 ISR clears DTCERF bit 6 (BCLR #6
+            // at 0x49BEEC), queue the packet ACK (0x03) and frame indicator.
+            // This happens INSIDE the TXI2 ISR (I-flag set), so RXI2 won't
+            // fire until after the ISR completes (RTE).
+            //
+            // The AVR sends two bytes after TX DTC completion:
+            //   1. 0x03 — packet received ACK (consumed by state 6 → completion → state 1)
+            //   2. 0x32/0xC8 — frame size indicator (consumed by state 1 → RX DTC setup)
+            // tickSci2() delivers them one at a time (gated by sci0Rdrf), so CyOS
+            // processes 0x03 first in state 6, then the indicator in state 1.
             if (sci2PendingIndicator >= 0 && (value & 0x40) == 0) {
-                System.err.printf("[SCI2-DTC] Deferred indicator 0x%02X delivered (DTCERF cleared at PC=0x%06X)%n",
+                System.err.printf("[SCI2-DTC] Deferred 0x03+0x%02X delivered (DTCERF cleared at PC=0x%06X)%n",
                         sci2PendingIndicator, pc);
-                radio.queueResponse(sci2PendingIndicator);
+                radio.queueResponse(0x03); // Packet ACK for state 6
+                radio.queueResponse(sci2PendingIndicator); // Frame indicator for state 1
                 sci2PendingIndicator = -1;
             }
             return;
@@ -1033,18 +1038,26 @@ public class AddressBus {
                     txHex.append(String.format("%02X ", b));
                     txAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
                 }
-                System.err.printf("[SCI2-DTC] TX %d bytes from 0x%06X: %s |%s|%n",
-                        count, sarLo, txHex.toString().trim(), txAscii);
+                System.err.printf("[SCI2-DTC] TX %d bytes MRA=0x%02X from 0x%06X ind=0x%02X: %s |%s|%n",
+                        count, mra, sarLo, sci2PendingIndicator,
+                        txHex.toString().trim(), txAscii);
             } else if (rxiDtc && receiveMode) {
                 // RX DTC: CyOS sets DTCERF bit 7 after receiving 0x32/0xC8 frame
                 // indicator, expecting hardware DTC to bulk-transfer N bytes from
                 // SCI2 RDR to a RAM buffer. We execute this immediately.
+                //
+                // MRA determines address mode:
+                //   0x20: dest increment (real data DTC, state 4)
+                //   0x00: dest fixed (discard DTC, state 5 — channel mismatch)
+                // For discard mode, write all bytes to dar+0 (no increment) to
+                // avoid corrupting adjacent CyOS memory.
+                boolean destIncrement = (mra & 0x30) != 0; // DM bits 5:4
                 radio.prepareRxFrame(count);
                 StringBuilder rxHex = new StringBuilder();
                 StringBuilder rxAscii = new StringBuilder();
                 for (int i = 0; i < count; i++) {
                     int b = radio.hasData() ? radio.read() : 0xFF;
-                    write8(dar + i, b);
+                    write8(destIncrement ? (dar + i) : dar, b);
                     if (i < 52) {
                         rxHex.append(String.format("%02X ", b));
                         rxAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
@@ -1055,8 +1068,18 @@ public class AddressBus {
                 // normal RXI2 ISR fires (DISEL=0). CyOS ISR in state 4/5 calls
                 // the completion handler regardless of byte value.
                 radio.queueResponse(0xFF);
-                System.err.printf("[SCI2-DTC] RX %d bytes → 0x%06X: %s |%s|%n",
-                        count, dar, rxHex.toString().trim(), rxAscii);
+                // Log CyOS radio state for diagnostics
+                int radioObj = (read8(0x4B49FE) << 24) | (read8(0x4B49FF) << 16)
+                        | (read8(0x4B4A00) << 8) | read8(0x4B4A01);
+                int cyState = -1, chA = -1, chB = -1;
+                if (radioObj >= 0x400000 && radioObj < 0x600000) {
+                    cyState = read8(radioObj + 0x335A);
+                    chA = read8(radioObj + 0x335B);
+                    chB = read8(radioObj + 0x335C);
+                }
+                System.err.printf("[SCI2-DTC] RX %d bytes MRA=0x%02X → 0x%06X (state=%d ch=%d/%d): %s |%s|%n",
+                        count, mra, dar, cyState, chA, chB,
+                        rxHex.toString().trim(), rxAscii);
             }
         }
 

@@ -194,14 +194,27 @@ public class RadioCoProcessor {
      */
     public void handleTransmit(byte[] data) {
         if (transport != null) {
+            // Short TX DTC frames (e.g. 4-byte init command 01 03 00 00) are
+            // AVR commands, not radio packets. Skip network send — they have
+            // no RF header and produce 0-byte payloads after stripping.
+            if (data.length <= RF_HEADER_SIZE + 1) return;
+
             // Strip RF preamble + sync word (first 8 bytes) and trailing
             // status byte (last byte). CyOS TX DTC sends frame_size+1 bytes
             // (50+1=51 for polls, 200+1=201 for scans). The extra byte is a
             // status/terminator for the AVR, not part of the radio payload.
-            int start = Math.min(RF_HEADER_SIZE, data.length);
-            int end = Math.max(start, data.length - 1); // strip trailing byte
+            int start = RF_HEADER_SIZE;
+            int end = data.length - 1; // strip trailing byte
             byte[] payload = java.util.Arrays.copyOfRange(data, start, end);
-            transport.sendPacket(payload, currentChannel);
+
+            // Extract channel from the frame content's channel byte (byte 0
+            // of payload = 0xC0 | channel). CyOS channel-hops during peer
+            // discovery (ch=2↔ch=4), and may change currentChannel between
+            // preparing the frame and firing the TX DTC. Using the frame's
+            // own channel byte ensures the UDP transport channel matches
+            // what CyOS wrote into the frame content.
+            int frameChannel = payload[0] & 0x3F;
+            transport.sendPacket(payload, frameChannel);
         }
     }
 
@@ -228,28 +241,42 @@ public class RadioCoProcessor {
      * Does NOT queue the indicator — AddressBus handles deferred delivery
      * to ensure TXI2 ISR runs before the indicator reaches RXI2.
      *
-     * @return 0x32 if received frames are available, 0xC8 if none
+     * <p>The indicator is the RX DTC byte count that CyOS will set up:
+     * <ul>
+     *   <li>0x32 (50) — small frame available (poll beacon, ≤50 bytes)</li>
+     *   <li>0xC8 (200) — large frame available (scan/chat, &gt;50 bytes)
+     *       OR no data (CyOS distinguishes by content: real data vs 0xFF)</li>
+     * </ul>
+     *
+     * @return 0x32 for small frames, 0xC8 for large frames or no data
      */
     public int completeTxDtc() {
-        return receivedFrames.isEmpty() ? 0xC8 : 0x32;
+        if (receivedFrames.isEmpty()) return 0xC8;
+        byte[] next = receivedFrames.peek();
+        return (next.length > 50) ? 0xC8 : 0x32;
     }
 
     /**
-     * Prepare received frame data for RX DTC transfer. For real data reads
-     * (count ≤ 50, triggered by 0x32 indicator), dequeues one frame from
-     * receivedFrames and loads it into rxQueue padded with 0xFF.
-     * For null reads (count > 50, triggered by 0xC8 "no data"), fills
-     * with 0xFF without consuming any received frames.
+     * Prepare received frame data for RX DTC transfer. Dequeues one frame
+     * from receivedFrames (if available) and loads it into rxQueue, padded
+     * with 0xFF to fill the requested count. If no frame is available,
+     * fills entirely with 0xFF (null read).
+     *
+     * <p>The indicator (0x32 or 0xC8) determines the count:
+     * <ul>
+     *   <li>0x32 → count=50 (small frame: poll beacon)</li>
+     *   <li>0xC8 → count=200 (large frame: scan/chat, or no data)</li>
+     * </ul>
+     * CyOS distinguishes "large frame" from "no data" by checking the
+     * content — real frames start with a channel byte (0xC0+), null
+     * reads are all 0xFF.
      *
      * Called by AddressBus when CyOS sets up RX DTC (DTCERF bit 7 = RXI2).
      *
-     * @param count number of bytes CyOS expects (50 for data, 200 for null)
+     * @param count number of bytes CyOS expects (50 or 200)
      */
     public void prepareRxFrame(int count) {
-        // Only dequeue a real frame for data reads (0x32 → count=50).
-        // Null reads (0xC8 → count=200) must NOT consume received frames,
-        // otherwise frames get silently eaten during "no data" DTC cycles.
-        byte[] frame = (count <= 50) ? receivedFrames.poll() : null;
+        byte[] frame = receivedFrames.poll();
         if (frame != null) {
             int len = Math.min(frame.length, count);
             for (int i = 0; i < len; i++) {
