@@ -231,16 +231,14 @@ class RadioCoProcessorTest {
         radio.receive(0x30);
         radio.receive(0x00);
         assertFalse(radio.hasData());
-        // completeTxDtc returns indicator; AddressBus handles deferred delivery
+        // completeTxDtc returns -1 (no data); AddressBus sends only 0x03 ACK
         int indicator = radio.completeTxDtc();
-        assertEquals(0xC8, indicator); // No received frames → null indicator
+        assertEquals(-1, indicator); // No received frames → no indicator
         assertFalse(radio.hasData()); // completeTxDtc doesn't queue anything
-        // Simulate AddressBus deferred delivery: 0x03 + indicator
+        // Simulate AddressBus deferred delivery: 0x03 only (no indicator)
         radio.queueResponse(0x03);
-        radio.queueResponse(indicator);
         assertTrue(radio.hasData());
         assertEquals(0x03, radio.read());
-        assertEquals(0xC8, radio.read());
         assertFalse(radio.hasData());
         // 3-byte channel change still works
         radio.transfer(0x01);
@@ -283,11 +281,11 @@ class RadioCoProcessorTest {
         assertFalse(radio.hasData());
     }
 
-    @Test void completeTxDtcNoFrameReturnsNullIndicator() {
+    @Test void completeTxDtcNoFrameReturnsNoIndicator() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        // No received frames — returns 0xC8 without queuing
+        // No received frames — returns -1 (no indicator)
         int indicator = radio.completeTxDtc();
-        assertEquals(0xC8, indicator);
+        assertEquals(-1, indicator);
         assertFalse(radio.hasData()); // Nothing queued
     }
 
@@ -438,7 +436,7 @@ class RadioCoProcessorTest {
         radio.receive(0x30);
         radio.receive(0x00);
         int pollIndicator = radio.completeTxDtc();
-        assertEquals(0xC8, pollIndicator); // "No data" — large frame skipped
+        assertEquals(-1, pollIndicator); // Large frame invisible to poll — no indicator
 
         // The 200-byte null RX DTC should NOT consume the large frame
         radio.prepareRxFrame(200);

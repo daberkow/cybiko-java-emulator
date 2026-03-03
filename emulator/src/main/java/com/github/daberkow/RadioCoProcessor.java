@@ -264,14 +264,19 @@ public class RadioCoProcessor {
      *       OR no data (CyOS distinguishes by content: real data vs 0xFF)</li>
      * </ul>
      *
-     * @return 0x32 for small frames, 0xC8 for large frames or no data
+     * @return 0x32 for small frames, 0xC8 for large frames, or -1 for no data.
+     *         When -1 is returned, the caller should send only 0x03 (ACK) and
+     *         NOT send an indicator byte — CyOS stays in state 1 waiting.
+     *         On real hardware the AVR only sends an indicator when there is
+     *         actual frame data to deliver; sending 0xC8 with no data causes
+     *         CyOS to set up a 200-byte null RX DTC that wastes heap memory.
      */
     public int completeTxDtc() {
         rxFrameReady = false;
         // On real hardware, the AVR/RF2915 has natural RF round-trip delay
         // (microseconds) before responding. Over UDP, frames from the peer
         // take milliseconds to arrive. Without this wait, completeTxDtc()
-        // always returns 0xC8 (no data) because it checks the queue before
+        // always returns -1 (no data) because it checks the queue before
         // UDP frames have been delivered by the listener thread. Wait briefly
         // to simulate RF round-trip time and let UDP frames arrive.
         if (receivedFrames.isEmpty() && transport != null) {
@@ -281,7 +286,8 @@ public class RadioCoProcessor {
                 }
             }
         }
-        if (receivedFrames.isEmpty()) return 0xC8;
+        if (receivedFrames.isEmpty()) return -1; // No data — don't send indicator
+
         byte[] next = receivedFrames.peek();
 
         // Poll (0x30) can only see small frames (≤50 bytes, like beacons).
@@ -289,7 +295,7 @@ public class RadioCoProcessor {
         // poll TX=42 bytes → RX captures ≤50 bytes only. Large frames
         // (scan/chat, >50 bytes) stay in the queue for the next scan (0xCF).
         if (lastCommandType == CMD_POLL && next.length > 50) {
-            return 0xC8; // "No data" — large frame invisible to poll
+            return -1; // Large frame invisible to poll — don't send indicator
         }
 
         rxFrameReady = true;
