@@ -205,8 +205,11 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
   bit 6 clear: 0x03 (packet ACK for state 6→completion→state 1) then the
   indicator (for state 1→RX DTC setup). Frame data is delivered via RX DTC:
   CyOS sets DTCERF bit 7 after receiving indicator, and AddressBus bulk-transfers
-  50/200 bytes to a RAM buffer via `prepareRxFrame()`. A dummy completion byte
-  triggers the RXI2 ISR in state 4 for frame delivery to the CyOS application layer. TX DTC data
+  50/200 bytes to a RAM buffer via `prepareRxFrame()`, which prepends an 8-byte
+  AVR header (4B broadcast 0xFFFFFFFF + 4B zeroed metadata) before the RF payload
+  so CyOS frame processing finds the destination ID at offset 0 and channel byte
+  at offset 8. A dummy completion byte triggers the RXI2 ISR in state 4 for frame
+  delivery to the CyOS application layer. TX DTC data
   has 8-byte RF header (4B preamble + 4B sync word) stripped before forwarding to peer
   emulators (RF2915 strips these on receive). Connected via SCI0 (V1/V2) or SCI2 (XT)
   with TXI2/RXI2 interrupt support. Both TX DTC (DTCERF bit 6) and RX DTC (bit 7)
@@ -386,8 +389,12 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   of using `currentChannel`, because CyOS channel-hops (ch=2↔ch=4) and may switch
   channels between preparing the frame and firing the TX DTC. MRA-based address
   mode in RX DTC: 0x20=dest increment (real data), 0x00=dest fixed (discard on
-  channel mismatch). Two-emulator headless test confirms bidirectional frame
-  exchange with correct channel matching. Chat peer discovery pending GUI testing. See
+  channel mismatch). RX DTC frames include an 8-byte AVR header prepended before
+  the RF payload: bytes 0-3 = destination peer ID (0xFFFFFFFF for broadcast),
+  bytes 4-7 = zeroed metadata. CyOS's main-loop radio task checks connObj->0x00
+  against the listener pointer or broadcast before processing. Without the header,
+  frames were silently discarded. Two-emulator headless test confirms bidirectional
+  frame exchange with broadcast header. Chat peer discovery pending GUI testing. See
   [docs/rf2915-research.md](docs/rf2915-research.md) for decoded frame format.
 
 ## Current Status

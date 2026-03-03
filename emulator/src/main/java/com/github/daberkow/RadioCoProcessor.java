@@ -51,6 +51,18 @@ public class RadioCoProcessor {
     private int heartbeatCounter = 0;
     private static final int HEARTBEAT_INTERVAL = 300; // frames (5 sec at 60fps)
 
+    // Track last 2-byte command type for poll/scan distinction.
+    // On real hardware, poll (0x30) only captures small frames (RF2915 RX
+    // window = 50 bytes), while scan (0xCF) captures any frame (RX = 200).
+    private static final int CMD_NONE = 0;
+    private static final int CMD_POLL = 1;  // 0x30: small frames only
+    private static final int CMD_SCAN = 2;  // 0xCF: any frame
+    private int lastCommandType = CMD_NONE;
+
+    // Set by completeTxDtc() to indicate a frame is ready for delivery.
+    // Consumed by prepareRxFrame() to decide whether to dequeue.
+    private boolean rxFrameReady = false;
+
     /**
      * Receive a byte from the CPU (TX path only). Accumulates bytes into a
      * variable-length command buffer. When the command is complete, processes it
@@ -170,6 +182,10 @@ public class RadioCoProcessor {
         System.err.printf("[RADIO] queueReceivedFrame %d bytes: %s |%s|%n",
                 data.length, hex.toString().trim(), ascii);
         receivedFrames.add(data);
+        // Wake up completeTxDtc() if it's waiting for frames
+        synchronized (receivedFrames) {
+            receivedFrames.notifyAll();
+        }
     }
 
     /**
@@ -251,38 +267,102 @@ public class RadioCoProcessor {
      * @return 0x32 for small frames, 0xC8 for large frames or no data
      */
     public int completeTxDtc() {
+        rxFrameReady = false;
+        // On real hardware, the AVR/RF2915 has natural RF round-trip delay
+        // (microseconds) before responding. Over UDP, frames from the peer
+        // take milliseconds to arrive. Without this wait, completeTxDtc()
+        // always returns 0xC8 (no data) because it checks the queue before
+        // UDP frames have been delivered by the listener thread. Wait briefly
+        // to simulate RF round-trip time and let UDP frames arrive.
+        if (receivedFrames.isEmpty() && transport != null) {
+            synchronized (receivedFrames) {
+                if (receivedFrames.isEmpty()) {
+                    try { receivedFrames.wait(10); } catch (InterruptedException ignored) {}
+                }
+            }
+        }
         if (receivedFrames.isEmpty()) return 0xC8;
         byte[] next = receivedFrames.peek();
+
+        // Poll (0x30) can only see small frames (≤50 bytes, like beacons).
+        // On real hardware, the RF2915 RX window is sized to the TX frame:
+        // poll TX=42 bytes → RX captures ≤50 bytes only. Large frames
+        // (scan/chat, >50 bytes) stay in the queue for the next scan (0xCF).
+        if (lastCommandType == CMD_POLL && next.length > 50) {
+            return 0xC8; // "No data" — large frame invisible to poll
+        }
+
+        rxFrameReady = true;
         return (next.length > 50) ? 0xC8 : 0x32;
     }
 
     /**
+     * AVR header size prepended to received frames. On real hardware, the AVR
+     * co-processor prepends 8 bytes of metadata before the RF payload when
+     * forwarding received frames to the H8S via UART. CyOS expects:
+     * <ul>
+     *   <li>Bytes 0-3: destination peer ID (or 0xFFFFFFFF for broadcast)</li>
+     *   <li>Bytes 4-7: metadata (cleared to 0x00)</li>
+     *   <li>Byte 8+: RF payload (channel byte, type, frame data)</li>
+     * </ul>
+     * This header occupies the space before the RF payload in the RX DTC
+     * buffer. The math confirms: TX sends 51/201 bytes (8 RF header + payload
+     * + 1 trailing), so RF payload = 42/192 bytes. RX DTC receives 50/200
+     * bytes. 50 - 42 = 8, 200 - 192 = 8 — exactly this header size.
+     */
+    private static final int AVR_RX_HEADER_SIZE = 8;
+
+    /**
      * Prepare received frame data for RX DTC transfer. Dequeues one frame
-     * from receivedFrames (if available) and loads it into rxQueue, padded
-     * with 0xFF to fill the requested count. If no frame is available,
-     * fills entirely with 0xFF (null read).
+     * from receivedFrames (if available) and loads it into rxQueue with an
+     * 8-byte AVR header prepended, padded with 0xFF to fill the requested
+     * count. If no frame is available, fills entirely with 0xFF (null read).
+     *
+     * <p>The AVR header ensures CyOS can process the frame:
+     * <ul>
+     *   <li>Bytes 0-3: broadcast marker (0xFFFFFFFF) so the main-loop radio
+     *       task accepts the frame (checks connObj->0x00 against listener
+     *       pointer or broadcast 0xFFFFFFFF at 0x49ADC8-0x49ADE4)</li>
+     *   <li>Bytes 4-7: zeroed metadata</li>
+     *   <li>Byte 8+: RF payload — channel byte at offset 8 passes the
+     *       channel format check (byte & 0xC0 == 0xC0) at 0x49ADAA</li>
+     * </ul>
      *
      * <p>The indicator (0x32 or 0xC8) determines the count:
      * <ul>
-     *   <li>0x32 → count=50 (small frame: poll beacon)</li>
-     *   <li>0xC8 → count=200 (large frame: scan/chat, or no data)</li>
+     *   <li>0x32 → count=50 (small frame: 8 header + 42 payload)</li>
+     *   <li>0xC8 → count=200 (large frame: 8 header + 192 payload,
+     *       or no data when filled with 0xFF)</li>
      * </ul>
-     * CyOS distinguishes "large frame" from "no data" by checking the
-     * content — real frames start with a channel byte (0xC0+), null
-     * reads are all 0xFF.
      *
      * Called by AddressBus when CyOS sets up RX DTC (DTCERF bit 7 = RXI2).
      *
      * @param count number of bytes CyOS expects (50 or 200)
      */
     public void prepareRxFrame(int count) {
-        byte[] frame = receivedFrames.poll();
+        // Only dequeue a frame if completeTxDtc() confirmed one is ready.
+        // This prevents poll-triggered 0xC8 (no small frame) from consuming
+        // a large frame that should wait for the next scan command.
+        byte[] frame = rxFrameReady ? receivedFrames.poll() : null;
+        rxFrameReady = false;
         if (frame != null) {
-            int len = Math.min(frame.length, count);
+            // Prepend 8-byte AVR header: broadcast destination + zero metadata
+            rxQueue.add(0xFF); // Bytes 0-3: broadcast destination (0xFFFFFFFF)
+            rxQueue.add(0xFF);
+            rxQueue.add(0xFF);
+            rxQueue.add(0xFF);
+            rxQueue.add(0x00); // Bytes 4-7: metadata (zeroed)
+            rxQueue.add(0x00);
+            rxQueue.add(0x00);
+            rxQueue.add(0x00);
+            // RF payload follows at offset 8
+            int payloadSpace = count - AVR_RX_HEADER_SIZE;
+            int len = Math.min(frame.length, payloadSpace);
             for (int i = 0; i < len; i++) {
                 rxQueue.add(frame[i] & 0xFF);
             }
-            for (int i = len; i < count; i++) {
+            // Pad remainder with 0xFF
+            for (int i = AVR_RX_HEADER_SIZE + len; i < count; i++) {
                 rxQueue.add(0xFF);
             }
         } else {
@@ -351,10 +431,10 @@ public class RadioCoProcessor {
     private void processCommand2(int header, int param) {
         if (header == 0x30) {
             // Poll command — CyOS will follow with TX DTC payload
+            lastCommandType = CMD_POLL;
         } else if (header == 0xCF) {
             // Scan/beacon command — CyOS will follow with TX DTC payload.
-            // CyOS assembles its own scan frames in the TX DTC buffer;
-            // no need for us to send extra beacons.
+            lastCommandType = CMD_SCAN;
         }
         // No immediate response queued — response comes from DTC completion path
     }

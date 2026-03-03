@@ -512,33 +512,61 @@ Offset  Example (hex)     Description
 200     00                Trailing status byte
 ```
 
-### RF Header Stripping
+### RF Header Stripping (TX side)
 
 The first 8 bytes (preamble + sync word) are for RF2915 programming:
 - **TX**: CyOS includes them so the AVR can configure the RF2915 transmitter
-- **RX**: The RF2915 detects preamble/sync automatically and strips them;
-  CyOS receives only the payload starting at byte 8
+- **RX**: The RF2915 detects preamble/sync automatically and strips them
 
 For emulator-to-emulator networking, we strip the 8-byte RF header and the
 trailing status byte before forwarding over UDP. The UDP transport channel
 is extracted from the frame content's channel byte (`payload[0] & 0x3F`),
 not from `RadioCoProcessor.currentChannel`, because CyOS channel-hops and
 may change channels between preparing the frame and firing the TX DTC.
-The receiving emulator delivers only the payload that CyOS's RX parser expects.
+
+### AVR RX Header (RX side)
+
+On the receive path, the AVR prepends an 8-byte header before the RF payload
+when forwarding data to the H8S via UART. This header occupies the first 8
+bytes of the RX DTC buffer, with the RF payload starting at byte 8:
+
+```
+RX DTC buffer layout (50 or 200 bytes):
+Offset  Size  Content
+------  ----  ------------------------------------------
+0-3     4     Destination peer ID or 0xFFFFFFFF (broadcast)
+4-7     4     Metadata (zeroed)
+8       1     Channel byte (0xC0 | channel)
+9       1     Frame type byte
+10+     N     Frame data (poll beacon or scan/chat payload)
+```
+
+The math confirms: TX sends 51/201 bytes (8 preamble+sync + 42/192 RF payload
++ 1 trailing). RX DTC receives 50/200 bytes. 50 - 42 = 8, 200 - 192 = 8 —
+exactly the AVR header size.
+
+CyOS's main-loop radio task (0x49ADFE) reads connObj->0x00 (bytes 0-3 of the
+RX buffer) and compares against:
+1. The listener pointer at 0x4B4AC2 (device's own peer ID)
+2. Broadcast (0xFFFFFFFF)
+If neither matches, the frame is silently discarded. For peer discovery,
+frames use broadcast destination (0xFFFFFFFF).
 
 ### Channel Encoding
 
-Channel byte (offset 8 in TX buffer, offset 0 in RX payload): `0xC0 | channel`
+Channel byte (offset 8 in TX buffer, offset 8 in RX DTC buffer): `0xC0 | channel`
 - 0xC2 = channel 2 (CyOS default after `01 02 02`)
 - 0xC4 = channel 4 (after `01 02 04`)
 - CyOS alternates between channels during scanning
 
-### Frame Types (offset 9 in TX buffer, offset 1 in RX payload)
+### Frame Types (offset 9 in TX/RX buffer)
 
-| Byte | Type | TX DTC Size | Command |
-|------|------|-------------|---------|
-| 0x01 | Beacon/presence | 51 bytes | 0x30 (poll) |
-| 0x20 | Data/message | 201 bytes | 0xCF (scan) or 0x30 |
+| Byte & 0xE0 | Type | TX DTC Size | Command |
+|-------------|------|-------------|---------|
+| 0x00 (0x01) | Beacon/presence | 51 bytes | 0x30 (poll) |
+| 0x20 | Data/message | 201 bytes | 0xCF (scan) |
+| 0x40 | Connection match | varies | — |
+| 0x60 | Control frame | varies | — |
 
 ### RX Delivery
 
@@ -559,7 +587,7 @@ not radio packets — they are not forwarded over the network.
 
 ### Username Field
 
-The username at offset 20 (TX) / offset 12 (RX payload) uses an 8-byte fixed
+The username at offset 20 (TX) / offset 20 (RX DTC buffer = 8 header + 12) uses an 8-byte fixed
 buffer initialized to "unknown\0". The username overwrites from the left:
 - "Dan" (3 chars): `44 61 6E 00 6F 77 6E 00` = "Dan\0own\0"
 - "Sa" (2 chars): `53 61 00 6E 6F 77 6E 00` = "Sa\0nown\0"

@@ -266,11 +266,18 @@ class RadioCoProcessorTest {
         assertFalse(radio.hasData());
 
         // Frame data delivered separately via prepareRxFrame (simulates RX DTC)
+        // prepareRxFrame prepends 8-byte AVR header: FF FF FF FF 00 00 00 00
         radio.prepareRxFrame(50);
+        // Bytes 0-3: broadcast destination
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: zeroed metadata
+        for (int i = 0; i < 4; i++) assertEquals(0x00, radio.read());
+        // Bytes 8-10: frame payload
         assertEquals(0x01, radio.read());
         assertEquals(0x02, radio.read());
         assertEquals(0x03, radio.read());
-        for (int i = 0; i < 47; i++) {
+        // Bytes 11-49: 0xFF padding
+        for (int i = 0; i < 39; i++) {
             assertEquals(0xFF, radio.read());
         }
         assertFalse(radio.hasData());
@@ -288,13 +295,19 @@ class RadioCoProcessorTest {
         RadioCoProcessor radio = new RadioCoProcessor();
         byte[] frame = new byte[]{0x10, 0x20, 0x30};
         radio.queueReceivedFrame(frame);
+        // completeTxDtc() must be called first to mark frame as ready
+        assertEquals(0x32, radio.completeTxDtc());
         radio.prepareRxFrame(50);
-        // First 3 bytes are frame data
+        // Bytes 0-3: broadcast header (0xFFFFFFFF)
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: zeroed metadata
+        for (int i = 0; i < 4; i++) assertEquals(0x00, radio.read());
+        // Bytes 8-10: frame payload
         assertEquals(0x10, radio.read());
         assertEquals(0x20, radio.read());
         assertEquals(0x30, radio.read());
-        // Remaining 47 bytes are 0xFF padding
-        for (int i = 0; i < 47; i++) {
+        // Remaining 39 bytes are 0xFF padding
+        for (int i = 0; i < 39; i++) {
             assertEquals(0xFF, radio.read());
         }
         assertFalse(radio.hasData());
@@ -323,15 +336,21 @@ class RadioCoProcessorTest {
         int indicator = radio.completeTxDtc();
         assertEquals(0xC8, indicator);
 
-        // prepareRxFrame(200) delivers the large frame
+        // prepareRxFrame(200) delivers the large frame with 8-byte AVR header
         radio.prepareRxFrame(200);
-        assertEquals(0xC4, radio.read()); // channel byte
-        assertEquals(0x20, radio.read()); // scan type
-        // Skip to message at offset 18
-        for (int i = 2; i < 18; i++) radio.read();
+        // Bytes 0-3: broadcast header
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: zeroed metadata
+        for (int i = 0; i < 4; i++) assertEquals(0x00, radio.read());
+        // Byte 8: channel byte (frame payload starts here)
+        assertEquals(0xC4, radio.read());
+        // Byte 9: scan type
+        assertEquals(0x20, radio.read());
+        // Skip to message at offset 26 (header 8 + frame offset 18)
+        for (int i = 10; i < 26; i++) radio.read();
         assertEquals(0x0F, radio.read()); // message length
-        // Remaining 181 bytes (frame data + padding)
-        for (int i = 19; i < 200; i++) radio.read();
+        // Remaining bytes (frame data + no padding — 8+192=200 exact fit)
+        for (int i = 27; i < 200; i++) radio.read();
         assertFalse(radio.hasData());
     }
 
@@ -408,5 +427,66 @@ class RadioCoProcessorTest {
         assertEquals(4, sentChannel[0]);
         assertNotNull(sentData[0]);
         assertEquals((byte) 0xC4, sentData[0][0]);
+    }
+
+    @Test void pollSkipsLargeFramesScanDeliversThem() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Queue a large frame (192 bytes, like a scan/chat response)
+        radio.queueReceivedFrame(new byte[192]);
+
+        // Simulate poll command (0x30 0x00) — large frames invisible
+        radio.receive(0x30);
+        radio.receive(0x00);
+        int pollIndicator = radio.completeTxDtc();
+        assertEquals(0xC8, pollIndicator); // "No data" — large frame skipped
+
+        // The 200-byte null RX DTC should NOT consume the large frame
+        radio.prepareRxFrame(200);
+        for (int i = 0; i < 200; i++) {
+            assertEquals(0xFF, radio.read());
+        }
+
+        // Frame is still in queue — verify via scan command
+        radio.receive(0xCF);
+        radio.receive(0x00);
+        int scanIndicator = radio.completeTxDtc();
+        assertEquals(0xC8, scanIndicator); // 0xC8 = large frame (192 > 50)
+
+        // The 200-byte RX DTC should now deliver the large frame with header
+        radio.prepareRxFrame(200);
+        // Bytes 0-3: broadcast header
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: zeroed metadata
+        for (int i = 0; i < 4; i++) assertEquals(0x00, radio.read());
+        // Byte 8: first byte of 192-byte frame payload
+        assertEquals(0x00, radio.read());
+        // Skip remaining 191 frame bytes (8+192=200 exact fit)
+        for (int i = 9; i < 200; i++) radio.read();
+        assertFalse(radio.hasData());
+    }
+
+    @Test void pollDeliversSmallFrames() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Queue a small frame (42 bytes, like a poll beacon)
+        radio.queueReceivedFrame(new byte[]{0x10, 0x20, 0x30});
+
+        // Simulate poll command — small frames are visible
+        radio.receive(0x30);
+        radio.receive(0x00);
+        int indicator = radio.completeTxDtc();
+        assertEquals(0x32, indicator); // Small frame available
+
+        radio.prepareRxFrame(50);
+        // Bytes 0-3: broadcast header
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: zeroed metadata
+        for (int i = 0; i < 4; i++) assertEquals(0x00, radio.read());
+        // Bytes 8-10: frame payload
+        assertEquals(0x10, radio.read());
+        assertEquals(0x20, radio.read());
+        assertEquals(0x30, radio.read());
+        // Bytes 11-49: 0xFF padding
+        for (int i = 0; i < 39; i++) assertEquals(0xFF, radio.read());
+        assertFalse(radio.hasData());
     }
 }
