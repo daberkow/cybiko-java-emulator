@@ -181,6 +181,13 @@ public class RadioCoProcessor {
         }
         System.err.printf("[RADIO] queueReceivedFrame %d bytes: %s |%s|%n",
                 data.length, hex.toString().trim(), ascii);
+        // Cap queue at 2 frames to prevent unbounded growth. CyOS's frame
+        // processing gate (D6==0) causes delivered frames to accumulate in
+        // the processing queue without being freed. By limiting received
+        // frames, we prevent the CyOS heap from being exhausted.
+        while (receivedFrames.size() >= 2) {
+            receivedFrames.poll(); // Discard oldest
+        }
         receivedFrames.add(data);
         // Wake up completeTxDtc() if it's waiting for frames
         synchronized (receivedFrames) {
@@ -264,19 +271,18 @@ public class RadioCoProcessor {
      *       OR no data (CyOS distinguishes by content: real data vs 0xFF)</li>
      * </ul>
      *
-     * @return 0x32 for small frames, 0xC8 for large frames, or -1 for no data.
-     *         When -1 is returned, the caller should send only 0x03 (ACK) and
-     *         NOT send an indicator byte — CyOS stays in state 1 waiting.
-     *         On real hardware the AVR only sends an indicator when there is
-     *         actual frame data to deliver; sending 0xC8 with no data causes
-     *         CyOS to set up a 200-byte null RX DTC that wastes heap memory.
+     * @return 0x32 for small frames, 0xC8 for large frames or no data.
+     *         Always returns a valid indicator (never -1) so that the full
+     *         DTC cycle completes and CyOS recycles its connection buffers.
+     *         For no-data cases, prepareRxFrame fills with a null pattern
+     *         that CyOS rejects quickly (destination 0x00000000, not broadcast).
      */
     public int completeTxDtc() {
         rxFrameReady = false;
         // On real hardware, the AVR/RF2915 has natural RF round-trip delay
         // (microseconds) before responding. Over UDP, frames from the peer
         // take milliseconds to arrive. Without this wait, completeTxDtc()
-        // always returns -1 (no data) because it checks the queue before
+        // always returns 0x32 (null frame) because it checks the queue before
         // UDP frames have been delivered by the listener thread. Wait briefly
         // to simulate RF round-trip time and let UDP frames arrive.
         if (receivedFrames.isEmpty() && transport != null) {
@@ -286,7 +292,7 @@ public class RadioCoProcessor {
                 }
             }
         }
-        if (receivedFrames.isEmpty()) return -1; // No data — don't send indicator
+        if (receivedFrames.isEmpty()) return 0x32; // Null frame — 50-byte RX DTC
 
         byte[] next = receivedFrames.peek();
 
@@ -295,7 +301,7 @@ public class RadioCoProcessor {
         // poll TX=42 bytes → RX captures ≤50 bytes only. Large frames
         // (scan/chat, >50 bytes) stay in the queue for the next scan (0xCF).
         if (lastCommandType == CMD_POLL && next.length > 50) {
-            return -1; // Large frame invisible to poll — don't send indicator
+            return 0x32; // Large frame invisible to poll — null 50-byte frame
         }
 
         rxFrameReady = true;
@@ -337,9 +343,17 @@ public class RadioCoProcessor {
      * <p>The indicator (0x32 or 0xC8) determines the count:
      * <ul>
      *   <li>0x32 → count=50 (small frame: 8 header + 42 payload)</li>
-     *   <li>0xC8 → count=200 (large frame: 8 header + 192 payload,
-     *       or no data when filled with 0xFF)</li>
+     *   <li>0xC8 → count=200 (large frame: 8 header + 192 payload)</li>
      * </ul>
+     *
+     * <p>When no frame is available, fills with all 0x00 instead of 0xFF.
+     * This is critical: CyOS's main-loop radio task checks connObj->0x00
+     * (bytes 0-3) against broadcast 0xFFFFFFFF. All-0xFF would PASS the
+     * broadcast check, causing CyOS to queue the null frame for processing.
+     * Since D6==0, the frame is never processed and leaks in the queue,
+     * eventually exhausting CyOS heap ("not enough memory"). All-0x00
+     * fails both the listener and broadcast checks, so CyOS immediately
+     * discards the frame and recycles the connection buffer.
      *
      * Called by AddressBus when CyOS sets up RX DTC (DTCERF bit 7 = RXI2).
      *
@@ -347,7 +361,7 @@ public class RadioCoProcessor {
      */
     public void prepareRxFrame(int count) {
         // Only dequeue a frame if completeTxDtc() confirmed one is ready.
-        // This prevents poll-triggered 0xC8 (no small frame) from consuming
+        // This prevents poll-triggered null frame from consuming
         // a large frame that should wait for the next scan command.
         byte[] frame = rxFrameReady ? receivedFrames.poll() : null;
         rxFrameReady = false;
@@ -372,8 +386,11 @@ public class RadioCoProcessor {
                 rxQueue.add(0xFF);
             }
         } else {
+            // Null frame: all 0x00 so CyOS rejects at listener/broadcast
+            // check (connObj->0x00 = 0x00000000 ≠ 0xFFFFFFFF broadcast).
+            // CyOS discards and recycles the connection buffer immediately.
             for (int i = 0; i < count; i++) {
-                rxQueue.add(0xFF);
+                rxQueue.add(0x00);
             }
         }
     }

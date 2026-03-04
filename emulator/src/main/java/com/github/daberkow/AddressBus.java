@@ -98,7 +98,7 @@ public class AddressBus {
     private boolean sci2Tdre = true;   // SCI2 TDRE flag (transmitter data register empty)
     private int sci2TxiDelay = 0;      // Countdown cycles until next TXI2 fires (0 = none pending)
     private static final int SCI2_TXI_DELAY = 32; // Cycles between TXI2 fires (~byte transmission time)
-    private int sci2PendingIndicator = -2; // Deferred frame indicator: -2=none pending, -1=ACK only (no data), 0x32/0xC8=with data
+    private int sci2PendingIndicator = -1; // Deferred frame indicator (0x32/0xC8) from TX DTC completion
 
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
@@ -829,26 +829,21 @@ public class AddressBus {
             // This happens INSIDE the TXI2 ISR (I-flag set), so RXI2 won't
             // fire until after the ISR completes (RTE).
             //
-            // The AVR sends bytes after TX DTC completion:
+            // The AVR sends two bytes after TX DTC completion:
             //   1. 0x03 — packet received ACK (consumed by state 6 → completion → state 1)
-            //   2. 0x32/0xC8 — frame size indicator (ONLY when data available;
-            //      consumed by state 1 → RX DTC setup)
-            // When completeTxDtc() returns -1 (no data), we send ONLY 0x03.
-            // CyOS stays in state 1 waiting for the next poll cycle. On real
-            // hardware the AVR only sends an indicator when there's actual frame
-            // data; sending one with no data causes CyOS to allocate a 200-byte
-            // heap buffer for null RX DTC, leaking memory over time.
-            if (sci2PendingIndicator != -2 && (value & 0x40) == 0) {
-                if (sci2PendingIndicator >= 0) {
-                    System.err.printf("[SCI2-DTC] Deferred 0x03+0x%02X delivered (DTCERF cleared at PC=0x%06X)%n",
-                            sci2PendingIndicator, pc);
-                    radio.queueResponse(0x03); // Packet ACK for state 6
-                    radio.queueResponse(sci2PendingIndicator); // Frame indicator for state 1
-                } else {
-                    System.err.printf("[SCI2-DTC] Deferred 0x03 only (no data) (DTCERF cleared at PC=0x%06X)%n", pc);
-                    radio.queueResponse(0x03); // Packet ACK only — no indicator
-                }
-                sci2PendingIndicator = -2; // sentinel: already delivered
+            //   2. 0x32/0xC8 — frame size indicator (consumed by state 1 → RX DTC setup)
+            // tickSci2() delivers them one at a time (gated by sci0Rdrf), so CyOS
+            // processes 0x03 first in state 6, then the indicator in state 1.
+            // We always send the indicator (even for null frames) so the full DTC
+            // cycle completes and CyOS recycles its connection buffers. Null frames
+            // use destination 0x00000000 (not broadcast) so CyOS rejects them
+            // immediately without queuing for processing.
+            if (sci2PendingIndicator >= 0 && (value & 0x40) == 0) {
+                System.err.printf("[SCI2-DTC] Deferred 0x03+0x%02X delivered (DTCERF cleared at PC=0x%06X)%n",
+                        sci2PendingIndicator, pc);
+                radio.queueResponse(0x03); // Packet ACK for state 6
+                radio.queueResponse(sci2PendingIndicator); // Frame indicator for state 1
+                sci2PendingIndicator = -1;
             }
             return;
         }
@@ -1047,9 +1042,8 @@ public class AddressBus {
                     txHex.append(String.format("%02X ", b));
                     txAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
                 }
-                System.err.printf("[SCI2-DTC] TX %d bytes MRA=0x%02X from 0x%06X ind=%s: %s |%s|%n",
-                        count, mra, sarLo,
-                        sci2PendingIndicator >= 0 ? String.format("0x%02X", sci2PendingIndicator) : "none",
+                System.err.printf("[SCI2-DTC] TX %d bytes MRA=0x%02X from 0x%06X ind=0x%02X: %s |%s|%n",
+                        count, mra, sarLo, sci2PendingIndicator,
                         txHex.toString().trim(), txAscii);
             } else if (rxiDtc && receiveMode) {
                 // RX DTC: CyOS sets DTCERF bit 7 after receiving 0x32/0xC8 frame

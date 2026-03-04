@@ -231,14 +231,16 @@ class RadioCoProcessorTest {
         radio.receive(0x30);
         radio.receive(0x00);
         assertFalse(radio.hasData());
-        // completeTxDtc returns -1 (no data); AddressBus sends only 0x03 ACK
+        // completeTxDtc returns 0x32 (null frame); AddressBus sends 0x03 + 0x32
         int indicator = radio.completeTxDtc();
-        assertEquals(-1, indicator); // No received frames → no indicator
+        assertEquals(0x32, indicator); // Null frame indicator
         assertFalse(radio.hasData()); // completeTxDtc doesn't queue anything
-        // Simulate AddressBus deferred delivery: 0x03 only (no indicator)
+        // Simulate AddressBus deferred delivery: 0x03 + indicator
         radio.queueResponse(0x03);
+        radio.queueResponse(indicator);
         assertTrue(radio.hasData());
         assertEquals(0x03, radio.read());
+        assertEquals(0x32, radio.read());
         assertFalse(radio.hasData());
         // 3-byte channel change still works
         radio.transfer(0x01);
@@ -281,11 +283,11 @@ class RadioCoProcessorTest {
         assertFalse(radio.hasData());
     }
 
-    @Test void completeTxDtcNoFrameReturnsNoIndicator() {
+    @Test void completeTxDtcNoFrameReturnsNullIndicator() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        // No received frames — returns -1 (no indicator)
+        // No received frames — returns 0x32 (null frame, 50-byte RX DTC)
         int indicator = radio.completeTxDtc();
-        assertEquals(-1, indicator);
+        assertEquals(0x32, indicator);
         assertFalse(radio.hasData()); // Nothing queued
     }
 
@@ -311,11 +313,11 @@ class RadioCoProcessorTest {
         assertFalse(radio.hasData());
     }
 
-    @Test void prepareRxFrameNoFrameFillsFF() {
+    @Test void prepareRxFrameNoFrameFillsZero() {
         RadioCoProcessor radio = new RadioCoProcessor();
         radio.prepareRxFrame(5);
         for (int i = 0; i < 5; i++) {
-            assertEquals(0xFF, radio.read());
+            assertEquals(0x00, radio.read()); // Null frame: all zeros
         }
         assertFalse(radio.hasData());
     }
@@ -354,10 +356,10 @@ class RadioCoProcessorTest {
 
     @Test void prepareRxNullReadNoFrame() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        // No frame queued — 200-byte null read fills with 0xFF
-        radio.prepareRxFrame(200);
-        for (int i = 0; i < 200; i++) {
-            assertEquals(0xFF, radio.read());
+        // No frame queued — 50-byte null read fills with 0x00
+        radio.prepareRxFrame(50);
+        for (int i = 0; i < 50; i++) {
+            assertEquals(0x00, radio.read()); // Null: all zeros
         }
         assertFalse(radio.hasData());
     }
@@ -436,12 +438,12 @@ class RadioCoProcessorTest {
         radio.receive(0x30);
         radio.receive(0x00);
         int pollIndicator = radio.completeTxDtc();
-        assertEquals(-1, pollIndicator); // Large frame invisible to poll — no indicator
+        assertEquals(0x32, pollIndicator); // Large frame invisible to poll — null frame
 
-        // The 200-byte null RX DTC should NOT consume the large frame
-        radio.prepareRxFrame(200);
-        for (int i = 0; i < 200; i++) {
-            assertEquals(0xFF, radio.read());
+        // The 50-byte null RX DTC should NOT consume the large frame
+        radio.prepareRxFrame(50);
+        for (int i = 0; i < 50; i++) {
+            assertEquals(0x00, radio.read()); // Null frame: all zeros
         }
 
         // Frame is still in queue — verify via scan command
