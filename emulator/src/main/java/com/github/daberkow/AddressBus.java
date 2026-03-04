@@ -100,6 +100,12 @@ public class AddressBus {
     private static final int SCI2_TXI_DELAY = 32; // Cycles between TXI2 fires (~byte transmission time)
     private int sci2PendingIndicator = -1; // Deferred frame indicator (0x32/0xC8) from TX DTC completion
 
+    // Async radio frame delivery: check every N cycles if CyOS is idle and
+    // frames are waiting. 512 cycles ≈ 28µs at 18.43MHz, responsive enough
+    // for frame delivery without significant per-cycle overhead.
+    private static final int ASYNC_RADIO_CHECK_INTERVAL = 512;
+    private int asyncRadioCheckCountdown = 0;
+
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
     // typically re-enabled interrupts. Our synchronous DTC fires during the SCR write (while
@@ -176,6 +182,30 @@ public class AddressBus {
             // Fire RXI2 if RIE is enabled in SCR
             if ((sci2Scr & 0x40) != 0 && cpu != null) {
                 cpu.requestInterrupt(89); // RXI2
+            }
+        }
+        // Async frame delivery: when CyOS's radio state machine is idle
+        // (state 1) and frames are waiting in the queue, inject the indicator
+        // byte directly. On real hardware, the AVR sends frames to the H8S
+        // autonomously — this emulates that behavior for frames received via
+        // UDP between TX DTC cycles.
+        if (asyncRadioCheckCountdown > 0) {
+            asyncRadioCheckCountdown--;
+        } else if (radio != null && radioSciChannel == 2
+                && !sci0Rdrf && !radio.hasData()
+                && sci2PendingIndicator < 0
+                && radio.hasPendingFrames()) {
+            asyncRadioCheckCountdown = ASYNC_RADIO_CHECK_INTERVAL;
+            // Read CyOS radio state — only inject if state == 1 (idle)
+            int radioObjAddr = (read8(0x4B49FE) << 24) | (read8(0x4B49FF) << 16)
+                    | (read8(0x4B4A00) << 8) | read8(0x4B4A01);
+            if (radioObjAddr >= 0x400000 && radioObjAddr < 0x600000) {
+                int cyState = read8(radioObjAddr + 0x335A);
+                if (cyState == 1) {
+                    radio.tryAsyncDelivery();
+                    // Indicator byte is now in rxQueue — will be delivered
+                    // by the RXI2 logic above on the next tick.
+                }
             }
         }
     }

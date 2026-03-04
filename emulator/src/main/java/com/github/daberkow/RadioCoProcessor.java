@@ -60,9 +60,15 @@ public class RadioCoProcessor {
     private static final int CMD_SCAN = 2;  // 0xCF: any frame
     private int lastCommandType = CMD_NONE;
 
-    // Set by completeTxDtc() to indicate a frame is ready for delivery.
-    // Consumed by prepareRxFrame() to decide whether to dequeue.
+    // Set by completeTxDtc() or tryAsyncDelivery() to indicate a frame is
+    // ready for delivery. Consumed by prepareRxFrame() to decide whether
+    // to dequeue.
     private boolean rxFrameReady = false;
+
+    // Set by tryAsyncDelivery() for unsolicited frame delivery (frames that
+    // arrive between TX DTC cycles). Separate from rxFrameReady so that a
+    // concurrent completeTxDtc() reset doesn't lose the async delivery.
+    private boolean asyncRxPending = false;
 
     /**
      * Receive a byte from the CPU (TX path only). Accumulates bytes into a
@@ -367,11 +373,12 @@ public class RadioCoProcessor {
      * @param count number of bytes CyOS expects (50 or 200)
      */
     public void prepareRxFrame(int count) {
-        // Only dequeue a frame if completeTxDtc() confirmed one is ready.
-        // This prevents poll-triggered null frame from consuming
-        // a large frame that should wait for the next scan command.
-        ReceivedFrame rf = rxFrameReady ? receivedFrames.poll() : null;
+        // Only dequeue a frame if completeTxDtc() or tryAsyncDelivery()
+        // confirmed one is ready. This prevents poll-triggered null frame
+        // from consuming a large frame that should wait for scan mode.
+        ReceivedFrame rf = (rxFrameReady || asyncRxPending) ? receivedFrames.poll() : null;
         rxFrameReady = false;
+        asyncRxPending = false;
         if (rf != null) {
             byte[] frame = rf.data();
             int senderId = rf.senderId();
@@ -417,6 +424,45 @@ public class RadioCoProcessor {
      */
     public void tick() {
         // No-op for now. CyOS drives all radio traffic via TX DTC.
+    }
+
+    /**
+     * Returns true if there are received frames waiting to be delivered.
+     * Used by AddressBus to decide whether to attempt async delivery.
+     */
+    public boolean hasPendingFrames() {
+        return !receivedFrames.isEmpty();
+    }
+
+    /**
+     * Attempt asynchronous frame delivery. Called by AddressBus when CyOS's
+     * radio state machine is idle (state 1) and there are pending frames.
+     *
+     * <p>On real hardware, the AVR co-processor captures frames autonomously
+     * from the RF2915 and sends them to the H8S via UART at any time. CyOS's
+     * RXI2 ISR processes the indicator byte in state 1 and sets up RX DTC.
+     * This method emulates that autonomous behavior — frames received via UDP
+     * between TX DTC cycles are delivered without waiting for the next poll/scan.
+     *
+     * <p>The indicator value matches the frame size: 0x32 (50) for small
+     * beacons (≤50 bytes), 0xC8 (200) for large frames (chat, name exchange).
+     * CyOS's state 1 handler reads the indicator and sets up the RX DTC
+     * count accordingly, regardless of whether the frame was solicited.
+     *
+     * @return indicator value (0x32 or 0xC8) if a frame was queued for
+     *         delivery, or -1 if no frames are available
+     */
+    public int tryAsyncDelivery() {
+        if (receivedFrames.isEmpty()) return -1;
+
+        ReceivedFrame next = receivedFrames.peek();
+        int indicator = (next.data().length > 50) ? 0xC8 : 0x32;
+
+        asyncRxPending = true;
+        rxQueue.add(indicator);
+        System.err.printf("[RADIO-ASYNC] Injecting indicator 0x%02X for %d-byte frame from 0x%08X%n",
+                indicator, next.data().length, next.senderId());
+        return indicator;
     }
 
     /**

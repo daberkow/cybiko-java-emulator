@@ -199,21 +199,28 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
   channel, config), 0x30/0xCF=2 bytes (poll, scan), all others=2 bytes. Two call paths:
   `transfer()` for SCI0 full-duplex (V1/V2), `receive()` for SCI2 async UART (XT).
   3-byte commands queue ACK (0x00) responses; 2-byte commands produce no immediate
-  response (ACK comes via DTC completion path). `completeTxDtc()` returns
-  frame size indicator: 0x32 (50) for small frames, 0xC8 (200) for large frames
-  or no data. After TX DTC, AddressBus defers delivery of TWO bytes via DTCERF
-  bit 6 clear: 0x03 (packet ACK for state 6→completion→state 1) then the
-  indicator (for state 1→RX DTC setup). Frame data is delivered via RX DTC:
+  response (ACK comes via DTC completion path). Two frame delivery paths:
+  **(1) Synchronous (TX DTC-driven):** `completeTxDtc()` returns frame size
+  indicator: 0x32 (50) for small frames, 0xC8 (200) for large frames or no data.
+  Waits up to 15ms for UDP frames. Poll (0x30) delivers small beacons only;
+  scan (0xCF) delivers any size. Short TX DTC (≤9 bytes) skips completeTxDtc()
+  to avoid resetting rxFrameReady and blocking. After TX DTC, AddressBus defers
+  delivery of TWO bytes via DTCERF bit 6 clear: 0x03 (packet ACK for state
+  6→completion→state 1) then the indicator (for state 1→RX DTC setup).
+  **(2) Async (autonomous):** `tryAsyncDelivery()` injects indicator into rxQueue
+  when CyOS radio state == 1 (idle) and frames are pending. Checked every 512
+  CPU cycles in tickSci2(). Uses `asyncRxPending` flag (separate from rxFrameReady)
+  so concurrent completeTxDtc() resets don't lose the delivery. Delivers both
+  small (0x32) and large (0xC8) frames. Frame data delivered via RX DTC:
   CyOS sets DTCERF bit 7 after receiving indicator, and AddressBus bulk-transfers
   50/200 bytes to a RAM buffer via `prepareRxFrame()`, which prepends an 8-byte
   AVR header (4B broadcast 0xFFFFFFFF + 4B sender CyID) before the RF payload
   so CyOS frame processing finds the destination ID at offset 0 and sender
-  identity at offset 4. Poll commands (0x30) always return null frames to
-  prevent OOM; only scan commands (0xCF) deliver real data. TX DTC data
-  has 8-byte RF header (4B preamble + 4B CyID) stripped before forwarding to
-  peer emulators (RF2915 strips these on receive). The CyID at TX bytes 4-7
-  is the sender's device identity; it equals the transport device ID because
-  `patchCyId()` overwrites flash CyID with radio-id at startup.
+  identity at offset 4. TX DTC data has 8-byte RF header (4B preamble + 4B CyID)
+  stripped before forwarding to peer emulators (RF2915 strips these on receive).
+  The CyID at TX bytes 4-7 is the sender's device identity; it equals the
+  transport device ID because `patchCyId()` overwrites flash CyID with radio-id
+  at startup. Received frame queue cap: 4 (handles CyOS 3x retransmit bursts).
   Connected via SCI0 (V1/V2) or SCI2 (XT)
   with TXI2/RXI2 interrupt support. Both TX DTC (DTCERF bit 6) and RX DTC (bit 7)
   are handled by `executeSci2Dtc()`.
@@ -375,7 +382,7 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   bypass startup waits. The RF object (0x202CB2) must never be resolved via stub —
   causes failed HW init. See V2 Investigation below. MAME also cannot fully boot V2
   CyOS with these ROMs.
-- **XT radio RX DTC and frame exchange working between emulators**: CyOS v1508
+- **XT radio peer discovery and chat working between emulators**: CyOS v1508
   uses SCI2 for radio with hardware DTC for both TX and RX. TX DTC sends outgoing
   frames (51/201 bytes). RX DTC bulk-transfers 50/200 bytes from SCI2 RDR to a RAM
   buffer (DTCERF bit 7). After TX DTC completion, AddressBus defers delivery of
@@ -386,20 +393,28 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   Frame size indicator matches frame type: 0x32 (50 bytes) for poll beacons
   (≤50 bytes), 0xC8 (200 bytes) for scan/chat frames (>50 bytes) or no data.
   CyOS distinguishes "large frame" from "no data" by content (real data vs 0xFF).
-  Short TX DTC frames (4-byte AVR commands like `01 03 00 00`) are filtered in
-  handleTransmit() to prevent 0-byte payload poisoning. handleTransmit() extracts
-  the channel from the frame content's channel byte (`payload[0] & 0x3F`) instead
-  of using `currentChannel`, because CyOS channel-hops (ch=2↔ch=4) and may switch
-  channels between preparing the frame and firing the TX DTC. MRA-based address
-  mode in RX DTC: 0x20=dest increment (real data), 0x00=dest fixed (discard on
-  channel mismatch). RX DTC frames include an 8-byte AVR header prepended before
-  the RF payload: bytes 0-3 = destination peer ID (0xFFFFFFFF for broadcast),
-  bytes 4-7 = sender's CyID (device identity). CyOS checks connObj->0x00
-  against the local CyID or broadcast. The CyID at flash offset 0x7F818 is
-  patched with radio-id via `patchCyId()` so each emulator has unique identity
-  (CRC32 checksum at 0x7FFFC recalculated). Poll commands (0x30) always return
-  null frames to prevent OOM from D6==0 frame accumulation. Only scan commands
-  (0xCF) deliver real data. Chat messages exchange between emulators confirmed.
+  Short TX DTC frames (≤9 bytes, e.g. 4-byte AVR commands like `01 03 00 00`)
+  skip completeTxDtc() entirely — they're command frames that don't need frame
+  exchange, and calling completeTxDtc() would reset rxFrameReady (losing a
+  pending frame) and block 15ms. handleTransmit() also filters these (no network
+  send). handleTransmit() extracts the channel from the frame content's channel
+  byte (`payload[0] & 0x3F`) instead of using `currentChannel`, because CyOS
+  channel-hops (ch=2↔ch=4) and may switch channels between preparing the frame
+  and firing the TX DTC. MRA-based address mode in RX DTC: 0x20=dest increment
+  (real data), 0x00=dest fixed (discard on channel mismatch). RX DTC frames
+  include an 8-byte AVR header prepended before the RF payload: bytes 0-3 =
+  destination peer ID (0xFFFFFFFF for broadcast), bytes 4-7 = sender's CyID
+  (device identity). CyOS checks connObj->0x00 against the local CyID or
+  broadcast. The CyID at flash offset 0x7F818 is patched with radio-id via
+  `patchCyId()` so each emulator has unique identity (CRC32 checksum at 0x7FFFC
+  recalculated). Poll commands (0x30) deliver small beacons (≤50 bytes) but
+  suppress large frames (>50 bytes) — matches real hardware where poll RX window
+  is 50 bytes. Scan commands (0xCF) deliver any frame size. Async frame delivery
+  via tickSci2() injects indicator bytes when CyOS radio state == 1 (idle),
+  checked every 512 CPU cycles. This emulates the AVR's autonomous frame
+  capture — frames received via UDP between TX DTC cycles are delivered without
+  waiting for the next poll/scan. Nearby peer discovery and Chat messaging
+  between emulators confirmed working.
   See [docs/rf2915-research.md](docs/rf2915-research.md) for decoded frame format.
 
 ## Current Status
@@ -423,10 +438,18 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - SCI2 async UART: receive() for TX path, RXI2 (vector 89) for response delivery
 - SCI2 TDRE state modeling with TXI2 (vector 90) interrupt generation
 - SCI2 DTC bulk transfer: TX via DTCERF bit 6, RX via DTCERF bit 7
-- TX DTC completion: 0x03 ACK + 0x32/0xC8 frame size indicator (50=data, 200=null)
+- TX DTC completion: 0x03 ACK + 0x32/0xC8 frame size indicator (50=small, 200=large/null)
+- Short TX DTC (≤9 bytes) skips completeTxDtc() — avoids rxFrameReady reset and 15ms block
 - RX DTC: 50/200-byte bulk transfer from SCI2 RDR to RAM buffer, completion ISR delivers frame
 - RF header stripping: 8-byte preamble+sync removed from TX before network forwarding
+- Poll (0x30) delivers small beacons (≤50 bytes), suppresses large frames (>50 bytes)
+- Scan (0xCF) delivers any frame size
+- Async frame delivery: tickSci2() injects indicator when CyOS state==1 (idle), every 512 cycles
+- Received frame queue cap: 4 (handles CyOS 3x retransmit bursts)
+- UDP wait in completeTxDtc(): 15ms (simulates RF round-trip for synchronous path)
 - CyOS radio frame format partially decoded (see docs/rf2915-research.md)
+- Nearby peer discovery works on home screen (beacons delivered during polls)
+- Chat messaging between emulators confirmed working
 - LAN radio networking via UDP multicast (--radio lan)
 - SDR TCP bridge stub for GNU Radio integration (--radio sdr)
 - V2 RF object blacklist conditionally relaxed when radio transport is connected

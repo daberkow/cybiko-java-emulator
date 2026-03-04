@@ -471,29 +471,19 @@ class RadioCoProcessorTest {
         assertFalse(radio.hasData());
     }
 
-    @Test void pollAlwaysReturnsNull() {
+    @Test void pollDeliversSmallFrames() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        // Queue a small frame (42 bytes, like a poll beacon)
+        // Queue a small frame (3 bytes, like a poll beacon)
         radio.queueReceivedFrame(new byte[]{0x10, 0x20, 0x30}, 0x12345678);
 
-        // Simulate poll command — polls always return null to prevent OOM.
-        // CyOS's frame processing gate (D6==0) causes delivered poll frames
-        // to accumulate without being freed. Only scans deliver real data.
+        // Simulate poll command — small frames (≤50 bytes) ARE delivered
+        // during polls. This enables peer discovery on the home screen where
+        // CyOS only does polls, never scans.
         radio.receive(0x30);
         radio.receive(0x00);
         int indicator = radio.completeTxDtc();
-        assertEquals(0x32, indicator); // Always null for polls
+        assertEquals(0x32, indicator); // Small frame available
 
-        radio.prepareRxFrame(50);
-        // Null frame: all zeros
-        for (int i = 0; i < 50; i++) assertEquals(0x00, radio.read());
-        assertFalse(radio.hasData());
-
-        // Frame is preserved — scan can still deliver it
-        radio.receive(0xCF);
-        radio.receive(0x00);
-        int scanIndicator = radio.completeTxDtc();
-        assertEquals(0x32, scanIndicator); // Small frame available via scan
         radio.prepareRxFrame(50);
         // Bytes 0-3: broadcast header
         for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
@@ -508,5 +498,135 @@ class RadioCoProcessorTest {
         assertEquals(0x30, radio.read());
         for (int i = 0; i < 39; i++) assertEquals(0xFF, radio.read());
         assertFalse(radio.hasData());
+    }
+
+    @Test void hasPendingFramesReflectsQueue() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        assertFalse(radio.hasPendingFrames());
+
+        radio.queueReceivedFrame(new byte[]{0x01}, 0);
+        assertTrue(radio.hasPendingFrames());
+
+        // completeTxDtc marks ready but doesn't dequeue
+        radio.completeTxDtc();
+        assertTrue(radio.hasPendingFrames());
+
+        // prepareRxFrame dequeues
+        radio.prepareRxFrame(50);
+        for (int i = 0; i < 50; i++) radio.read();
+        assertFalse(radio.hasPendingFrames());
+    }
+
+    @Test void tryAsyncDeliverySmallFrame() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // No frames — returns -1
+        assertEquals(-1, radio.tryAsyncDelivery());
+
+        // Queue a small frame
+        radio.queueReceivedFrame(new byte[]{0x42}, 0xDEADBEEF);
+        int indicator = radio.tryAsyncDelivery();
+        assertEquals(0x32, indicator); // Small frame → 0x32
+
+        // Indicator byte was queued for RXI2 delivery
+        assertTrue(radio.hasData());
+        assertEquals(0x32, radio.read());
+
+        // asyncRxPending causes prepareRxFrame to dequeue the frame
+        radio.prepareRxFrame(50);
+        // Bytes 0-3: broadcast header
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: sender device ID (0xDEADBEEF)
+        assertEquals(0xDE, radio.read());
+        assertEquals(0xAD, radio.read());
+        assertEquals(0xBE, radio.read());
+        assertEquals(0xEF, radio.read());
+        // Byte 8: payload
+        assertEquals(0x42, radio.read());
+        // Remaining: 0xFF padding
+        for (int i = 9; i < 50; i++) assertEquals(0xFF, radio.read());
+        assertFalse(radio.hasData());
+    }
+
+    @Test void tryAsyncDeliveryLargeFrame() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Queue a large frame (192 bytes, like a chat message)
+        radio.queueReceivedFrame(new byte[192], 0xAABBCCDD);
+        int indicator = radio.tryAsyncDelivery();
+        assertEquals(0xC8, indicator); // Large frame → 0xC8
+
+        // Consume indicator
+        assertEquals(0xC8, radio.read());
+
+        // prepareRxFrame delivers the large frame
+        radio.prepareRxFrame(200);
+        // Bytes 0-3: broadcast header
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: sender ID
+        assertEquals(0xAA, radio.read());
+        assertEquals(0xBB, radio.read());
+        assertEquals(0xCC, radio.read());
+        assertEquals(0xDD, radio.read());
+        // Remaining 192 bytes of payload (all zeros) — 8+192=200 exact fit
+        for (int i = 8; i < 200; i++) assertEquals(0x00, radio.read());
+        assertFalse(radio.hasData());
+    }
+
+    @Test void asyncDeliveryDoesNotInterfereWithSyncPath() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Queue two frames
+        radio.queueReceivedFrame(new byte[]{(byte) 0xAA}, 1);
+        radio.queueReceivedFrame(new byte[]{(byte) 0xBB}, 2);
+
+        // Sync path (completeTxDtc) delivers first frame
+        radio.receive(0xCF);
+        radio.receive(0x00);
+        assertEquals(0x32, radio.completeTxDtc());
+        radio.prepareRxFrame(50);
+        for (int i = 0; i < 50; i++) radio.read();
+
+        // Async path delivers second frame
+        int indicator = radio.tryAsyncDelivery();
+        assertEquals(0x32, indicator);
+        assertEquals(0x32, radio.read()); // consume indicator
+        radio.prepareRxFrame(50);
+        // Bytes 0-3: broadcast
+        for (int i = 0; i < 4; i++) assertEquals(0xFF, radio.read());
+        // Bytes 4-7: sender ID = 2
+        assertEquals(0x00, radio.read());
+        assertEquals(0x00, radio.read());
+        assertEquals(0x00, radio.read());
+        assertEquals(0x02, radio.read());
+        // Byte 8: payload
+        assertEquals(0xBB, radio.read());
+        for (int i = 9; i < 50; i++) assertEquals(0xFF, radio.read());
+        assertFalse(radio.hasPendingFrames());
+    }
+
+    @Test void queueCapAt4Frames() {
+        RadioCoProcessor radio = new RadioCoProcessor();
+        // Fill queue to cap (4 frames)
+        radio.queueReceivedFrame(new byte[]{0x01}, 1);
+        radio.queueReceivedFrame(new byte[]{0x02}, 2);
+        radio.queueReceivedFrame(new byte[]{0x03}, 3);
+        radio.queueReceivedFrame(new byte[]{0x04}, 4);
+
+        // 5th frame evicts oldest
+        radio.queueReceivedFrame(new byte[]{0x05}, 5);
+
+        // Deliver all 4 remaining frames via scan — first should be 0x02 (0x01 evicted)
+        radio.receive(0xCF);
+        radio.receive(0x00);
+        radio.completeTxDtc();
+        radio.prepareRxFrame(50);
+        // Skip broadcast header (4 bytes)
+        for (int i = 0; i < 4; i++) radio.read();
+        // Sender ID bytes 4-7: should be sender 2 (oldest after eviction)
+        assertEquals(0x00, radio.read());
+        assertEquals(0x00, radio.read());
+        assertEquals(0x00, radio.read());
+        assertEquals(0x02, radio.read());
+        // Payload byte
+        assertEquals(0x02, radio.read());
+        for (int i = 9; i < 50; i++) radio.read();
     }
 }
