@@ -138,6 +138,41 @@ public class CybikoEmulator {
         }
     }
 
+    /**
+     * Patch the CyID in flash ROM so each emulator instance has a unique identity.
+     * The CyID is stored at flash offset 0x7F818 (4 bytes, big-endian) within a
+     * validated config block (magic at 0x7F800, checksum at 0x7FFFC). CyOS reads
+     * this during boot via 0x49FF90 → 0x4B467E → 0x4B45B6 and caches it at
+     * 0x4B4AC2 in external RAM. Without unique CyIDs, CyOS's self-filter at
+     * 0x49AF08 rejects frames from devices with the same CyID.
+     *
+     * Also patches the 32-bit checksum at flash offset 0x7FFFC. The checksum is
+     * a simple XOR of all 32-bit words in the 2048-byte config block (excluding
+     * the checksum word itself).
+     *
+     * @param cyId the unique CyID to assign to this emulator instance
+     */
+    public void patchCyId(int cyId) {
+        if (flashRom == null) return;
+        int blockOffset = 0x7F800;
+        int cyIdOffset = 0x7F818;
+        // Patch directly in raw array (flash is non-writable Memory)
+        byte[] raw = flashRom.getRawData();
+        raw[cyIdOffset]     = (byte) (cyId >> 24);
+        raw[cyIdOffset + 1] = (byte) (cyId >> 16);
+        raw[cyIdOffset + 2] = (byte) (cyId >> 8);
+        raw[cyIdOffset + 3] = (byte) cyId;
+        // Recalculate CRC32 checksum over first 2044 bytes of config block
+        java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+        crc.update(raw, blockOffset, 2044);
+        int checksum = (int) crc.getValue();
+        raw[blockOffset + 2044] = (byte) (checksum >> 24);
+        raw[blockOffset + 2045] = (byte) (checksum >> 16);
+        raw[blockOffset + 2046] = (byte) (checksum >> 8);
+        raw[blockOffset + 2047] = (byte) checksum;
+        System.out.printf("Patched CyID: 0x%08X (checksum: 0x%08X)%n", cyId, checksum);
+    }
+
     public void loadSpiFlash(Path path) throws IOException {
         byte[] data = Files.readAllBytes(path);
         spiFlash = new AT45DB041Flash(data);
@@ -562,27 +597,28 @@ public class CybikoEmulator {
         }
 
         // Wire radio transport
-        if ("lan".equals(radioMode)) {
+        if ("lan".equals(radioMode) || "sdr".equals(radioMode)) {
+            int id = radioDeviceId != 0 ? radioDeviceId
+                   : Math.abs(java.util.UUID.randomUUID().hashCode());
+            // Patch CyID in flash ROM to match transport device ID.
+            // Each emulator needs a unique CyID or CyOS's self-filter at
+            // 0x49AF08 rejects frames from devices with the same CyID.
+            // Using the transport ID as the CyID makes senderId == CyID.
+            emu.patchCyId(id);
             try {
-                int id = radioDeviceId != 0 ? radioDeviceId
-                       : Math.abs(java.util.UUID.randomUUID().hashCode());
-                UdpMulticastTransport udp = new UdpMulticastTransport(id);
-                udp.start();
-                emu.getRadio().setTransport(udp);
-                Runtime.getRuntime().addShutdownHook(new Thread(udp::close));
+                if ("lan".equals(radioMode)) {
+                    UdpMulticastTransport udp = new UdpMulticastTransport(id);
+                    udp.start();
+                    emu.getRadio().setTransport(udp);
+                    Runtime.getRuntime().addShutdownHook(new Thread(udp::close));
+                } else {
+                    SdrTransport sdr = new SdrTransport(id, sdrHost, sdrPort);
+                    sdr.start();
+                    emu.getRadio().setTransport(sdr);
+                    Runtime.getRuntime().addShutdownHook(new Thread(sdr::close));
+                }
             } catch (IOException e) {
-                System.err.println("Warning: UDP multicast not available: " + e.getMessage());
-            }
-        } else if ("sdr".equals(radioMode)) {
-            try {
-                int id = radioDeviceId != 0 ? radioDeviceId
-                       : Math.abs(java.util.UUID.randomUUID().hashCode());
-                SdrTransport sdr = new SdrTransport(id, sdrHost, sdrPort);
-                sdr.start();
-                emu.getRadio().setTransport(sdr);
-                Runtime.getRuntime().addShutdownHook(new Thread(sdr::close));
-            } catch (IOException e) {
-                System.err.println("Warning: SDR bridge not available: " + e.getMessage());
+                System.err.println("Warning: Radio transport not available: " + e.getMessage());
             }
         }
 

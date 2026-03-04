@@ -535,7 +535,7 @@ RX DTC buffer layout (50 or 200 bytes):
 Offset  Size  Content
 ------  ----  ------------------------------------------
 0-3     4     Destination peer ID or 0xFFFFFFFF (broadcast)
-4-7     4     Metadata (zeroed)
+4-7     4     Sender's CyID (device identity from TX sync word)
 8       1     Channel byte (0xC0 | channel)
 9       1     Frame type byte
 10+     N     Frame data (poll beacon or scan/chat payload)
@@ -547,7 +547,7 @@ exactly the AVR header size.
 
 CyOS's main-loop radio task (0x49ADFE) reads connObj->0x00 (bytes 0-3 of the
 RX buffer) and compares against:
-1. The listener pointer at 0x4B4AC2 (device's own peer ID)
+1. The device's own CyID at 0x4B4AC2 (loaded from flash 0x7FF818)
 2. Broadcast (0xFFFFFFFF)
 If neither matches, the frame is silently discarded. For peer discovery,
 frames use broadcast destination (0xFFFFFFFF).

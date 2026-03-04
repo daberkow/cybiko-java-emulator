@@ -45,7 +45,8 @@ public class RadioCoProcessor {
     // delivered to the H8S CPU via the SCI0 protocol.
     // ConcurrentLinkedQueue because the UDP listener thread adds frames
     // while the emulator thread reads them.
-    private final Queue<byte[]> receivedFrames = new ConcurrentLinkedQueue<>();
+    private record ReceivedFrame(byte[] data, int senderId) {}
+    private final Queue<ReceivedFrame> receivedFrames = new ConcurrentLinkedQueue<>();
 
     // Heartbeat beacon for peer discovery
     private int heartbeatCounter = 0;
@@ -154,7 +155,7 @@ public class RadioCoProcessor {
         this.transport = transport;
         if (transport != null) {
             transport.setPacketListener((data, channel, senderId) ->
-                queueReceivedFrame(data));
+                queueReceivedFrame(data, senderId));
         }
     }
 
@@ -169,9 +170,10 @@ public class RadioCoProcessor {
      * Called by the transport listener when a packet arrives from the network.
      * The frame will be delivered to the CPU the next time it polls for data.
      *
-     * @param data raw frame bytes received from the network
+     * @param data     raw frame bytes received from the network
+     * @param senderId device ID of the sender (used for AVR header bytes 4-7)
      */
-    public void queueReceivedFrame(byte[] data) {
+    public void queueReceivedFrame(byte[] data, int senderId) {
         StringBuilder hex = new StringBuilder();
         StringBuilder ascii = new StringBuilder();
         for (int i = 0; i < Math.min(data.length, 52); i++) {
@@ -179,8 +181,8 @@ public class RadioCoProcessor {
             hex.append(String.format("%02X ", b));
             ascii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
         }
-        System.err.printf("[RADIO] queueReceivedFrame %d bytes: %s |%s|%n",
-                data.length, hex.toString().trim(), ascii);
+        System.err.printf("[RADIO] queueReceivedFrame %d bytes from 0x%08X: %s |%s|%n",
+                data.length, senderId, hex.toString().trim(), ascii);
         // Cap queue at 2 frames to prevent unbounded growth. CyOS's frame
         // processing gate (D6==0) causes delivered frames to accumulate in
         // the processing queue without being freed. By limiting received
@@ -188,7 +190,7 @@ public class RadioCoProcessor {
         while (receivedFrames.size() >= 2) {
             receivedFrames.poll(); // Discard oldest
         }
-        receivedFrames.add(data);
+        receivedFrames.add(new ReceivedFrame(data, senderId));
         // Wake up completeTxDtc() if it's waiting for frames
         synchronized (receivedFrames) {
             receivedFrames.notifyAll();
@@ -294,18 +296,20 @@ public class RadioCoProcessor {
         }
         if (receivedFrames.isEmpty()) return 0x32; // Null frame — 50-byte RX DTC
 
-        byte[] next = receivedFrames.peek();
-
-        // Poll (0x30) can only see small frames (≤50 bytes, like beacons).
-        // On real hardware, the RF2915 RX window is sized to the TX frame:
-        // poll TX=42 bytes → RX captures ≤50 bytes only. Large frames
-        // (scan/chat, >50 bytes) stay in the queue for the next scan (0xCF).
-        if (lastCommandType == CMD_POLL && next.length > 50) {
-            return 0x32; // Large frame invisible to poll — null 50-byte frame
+        // Poll commands (0x30) ALWAYS return null frames. On real hardware,
+        // poll RX captures small beacons, but CyOS's frame processing gate
+        // (D6==0) means delivered poll frames accumulate in the processing
+        // queue without being freed, exhausting heap in ~20 seconds.
+        // Only scan commands (0xCF) deliver real data — scans are used by
+        // Chat/Nearby when actively looking for peers/messages.
+        if (lastCommandType == CMD_POLL) {
+            return 0x32; // Null frame for polls — prevents OOM
         }
 
+        ReceivedFrame next = receivedFrames.peek();
+
         rxFrameReady = true;
-        return (next.length > 50) ? 0xC8 : 0x32;
+        return (next.data().length > 50) ? 0xC8 : 0x32;
     }
 
     /**
@@ -314,7 +318,7 @@ public class RadioCoProcessor {
      * forwarding received frames to the H8S via UART. CyOS expects:
      * <ul>
      *   <li>Bytes 0-3: destination peer ID (or 0xFFFFFFFF for broadcast)</li>
-     *   <li>Bytes 4-7: metadata (cleared to 0x00)</li>
+     *   <li>Bytes 4-7: sender's device ID (from transport layer)</li>
      *   <li>Byte 8+: RF payload (channel byte, type, frame data)</li>
      * </ul>
      * This header occupies the space before the RF payload in the RX DTC
@@ -335,7 +339,9 @@ public class RadioCoProcessor {
      *   <li>Bytes 0-3: broadcast marker (0xFFFFFFFF) so the main-loop radio
      *       task accepts the frame (checks connObj->0x00 against listener
      *       pointer or broadcast 0xFFFFFFFF at 0x49ADC8-0x49ADE4)</li>
-     *   <li>Bytes 4-7: zeroed metadata</li>
+     *   <li>Bytes 4-7: sender's device ID — CyOS uses this for frame
+     *       matching at 0x49ED9C (conn->0x00 == frame->0x04) and to
+     *       identify who sent the message in Chat/Nearby</li>
      *   <li>Byte 8+: RF payload — channel byte at offset 8 passes the
      *       channel format check (byte & 0xC0 == 0xC0) at 0x49ADAA</li>
      * </ul>
@@ -363,18 +369,23 @@ public class RadioCoProcessor {
         // Only dequeue a frame if completeTxDtc() confirmed one is ready.
         // This prevents poll-triggered null frame from consuming
         // a large frame that should wait for the next scan command.
-        byte[] frame = rxFrameReady ? receivedFrames.poll() : null;
+        ReceivedFrame rf = rxFrameReady ? receivedFrames.poll() : null;
         rxFrameReady = false;
-        if (frame != null) {
-            // Prepend 8-byte AVR header: broadcast destination + zero metadata
+        if (rf != null) {
+            byte[] frame = rf.data();
+            int senderId = rf.senderId();
+            // Prepend 8-byte AVR header: broadcast destination + sender ID
             rxQueue.add(0xFF); // Bytes 0-3: broadcast destination (0xFFFFFFFF)
             rxQueue.add(0xFF);
             rxQueue.add(0xFF);
             rxQueue.add(0xFF);
-            rxQueue.add(0x00); // Bytes 4-7: metadata (zeroed)
-            rxQueue.add(0x00);
-            rxQueue.add(0x00);
-            rxQueue.add(0x00);
+            // Bytes 4-7: sender's device ID (big-endian)
+            // CyOS uses this to identify the sender in frame matching at
+            // 0x49ED9C (conn->0x00 == frame->0x04) and for user display.
+            rxQueue.add((senderId >> 24) & 0xFF);
+            rxQueue.add((senderId >> 16) & 0xFF);
+            rxQueue.add((senderId >> 8) & 0xFF);
+            rxQueue.add(senderId & 0xFF);
             // RF payload follows at offset 8
             int payloadSpace = count - AVR_RX_HEADER_SIZE;
             int len = Math.min(frame.length, payloadSpace);
