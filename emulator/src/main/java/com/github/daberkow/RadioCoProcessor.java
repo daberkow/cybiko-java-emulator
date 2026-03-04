@@ -183,11 +183,11 @@ public class RadioCoProcessor {
         }
         System.err.printf("[RADIO] queueReceivedFrame %d bytes from 0x%08X: %s |%s|%n",
                 data.length, senderId, hex.toString().trim(), ascii);
-        // Cap queue at 2 frames to prevent unbounded growth. CyOS's frame
-        // processing gate (D6==0) causes delivered frames to accumulate in
-        // the processing queue without being freed. By limiting received
-        // frames, we prevent the CyOS heap from being exhausted.
-        while (receivedFrames.size() >= 2) {
+        // Cap queue at 4 frames to prevent unbounded growth while allowing
+        // retransmit bursts (CyOS sends each frame 3x). Previous cap of 2
+        // caused frames to be flushed before the next TX DTC cycle could
+        // consume them.
+        while (receivedFrames.size() >= 4) {
             receivedFrames.poll(); // Discard oldest
         }
         receivedFrames.add(new ReceivedFrame(data, senderId));
@@ -290,23 +290,24 @@ public class RadioCoProcessor {
         if (receivedFrames.isEmpty() && transport != null) {
             synchronized (receivedFrames) {
                 if (receivedFrames.isEmpty()) {
-                    try { receivedFrames.wait(10); } catch (InterruptedException ignored) {}
+                    try { receivedFrames.wait(15); } catch (InterruptedException ignored) {}
                 }
             }
         }
         if (receivedFrames.isEmpty()) return 0x32; // Null frame — 50-byte RX DTC
 
-        // Poll commands (0x30) ALWAYS return null frames. On real hardware,
-        // poll RX captures small beacons, but CyOS's frame processing gate
-        // (D6==0) means delivered poll frames accumulate in the processing
-        // queue without being freed, exhausting heap in ~20 seconds.
-        // Only scan commands (0xCF) deliver real data — scans are used by
-        // Chat/Nearby when actively looking for peers/messages.
-        if (lastCommandType == CMD_POLL) {
-            return 0x32; // Null frame for polls — prevents OOM
-        }
-
         ReceivedFrame next = receivedFrames.peek();
+
+        // During poll mode (0x30), only deliver small frames (≤50 bytes).
+        // On real hardware, poll RX has a 50-byte window — only beacons fit.
+        // Large frames (chat, name exchange) must wait for scan mode (0xCF)
+        // which uses a 200-byte RX window. This matches real hardware behavior
+        // and prevents delivering oversized frames that poll-mode CyOS code
+        // may not expect. Small beacons ARE delivered during polls so peer
+        // discovery works even when the user is on the home screen.
+        if (lastCommandType == CMD_POLL && next.data().length > 50) {
+            return 0x32; // Large frame waits for scan mode
+        }
 
         rxFrameReady = true;
         return (next.data().length > 50) ? 0xC8 : 0x32;

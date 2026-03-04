@@ -1023,11 +1023,21 @@ public class AddressBus {
                     txData[i] = (byte) read8(sarLo + i);
                 }
                 radio.handleTransmit(txData);
-                // Defer indicator delivery: store the 0x32/0xC8 indicator for
-                // later. The TXI2 ISR must run first (transitions state 2→1)
-                // before the indicator can be processed by RXI2 in state 1.
-                // Delivery happens in the SCR write handler when TIE is cleared.
-                sci2PendingIndicator = radio.completeTxDtc();
+                // Short TX DTC frames (≤9 bytes, e.g. 4-byte init/channel
+                // commands like 01 06 19 00) are AVR commands, not radio
+                // packets. Skip completeTxDtc() for these — they don't need
+                // frame exchange, and calling completeTxDtc() would reset
+                // rxFrameReady (losing a pending frame) and block 15ms
+                // waiting for UDP frames that will never come.
+                if (count <= 9) {
+                    sci2PendingIndicator = 0x32; // Null indicator
+                } else {
+                    // Defer indicator delivery: store the 0x32/0xC8 indicator for
+                    // later. The TXI2 ISR must run first (transitions state 2→1)
+                    // before the indicator can be processed by RXI2 in state 1.
+                    // Delivery happens in the SCR write handler when TIE is cleared.
+                    sci2PendingIndicator = radio.completeTxDtc();
+                }
                 // Fire TXI2 completion interrupt so CyOS's TXI2 ISR runs
                 // the TX DTC completion handler (0x49BEE4: clears TIE, calls
                 // TX complete handler at 0x49C5F0 which transitions state 2→1).
