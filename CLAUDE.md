@@ -329,11 +329,15 @@ two hashes as the clock colon blinks. All hashes confirmed by user on GUI displa
 | Phase | Frames | VRAM Hash  | Description | PC |
 |-------|--------|------------|-------------|-----|
 | 1 | ~1-60 | CC3A6F3D | Boot ROM init (all black) | 0x002D34 (boot ROM) |
-| 2 | ~60-120 | 4ACC524E | SPI flash loading (dot pattern) | 0x20B756 (CyOS) |
-| 3 | ~240-300 | 5580FBFF | CyOS decompression / early init | 0x205CC2 |
+| 2 | ~60-120 | 4ACC524E | SPI flash loading (dot pattern) | 0x20B4B8 (CyOS) |
+| 3 | ~240-300 | 5580FBFF | CyOS decompression / early init | 0x205A76 |
 | 4 | ~360 | C0DBEF72 | Animated Cybiko logo (same as XT) | 0x219C8E (halted) |
-| 5 | ~480-540 | F48DA453 | CyOS initialization | 0x219C8E (halted) |
-| 6 | ~660+ | EFD624A8 | Final screen (CyOS UI) | 0x219C8E (halted) |
+| 5 | ~480 | varies | CyOS service init + battery check | 0x206BFC |
+| 6 | ~540+ | 65D3B6FC | CyOS UI (interactive) | 0x219C8E (halted) |
+
+V1 boots to interactive UI without a service stub. The key fix was ADC channel
+values: ch1=0x0300, ch2=0x0100 (differential > 15 passes CyOS battery check).
+No service stub needed — unlike V2, V1 CyOS handles blocked services gracefully.
 
 ### V2 Boot Phases
 | Phase | Frames | VRAM Hash  | Description | PC |
@@ -366,6 +370,10 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - **I2C routing per machine**: V1/V2 use DDR-based SDA, XT uses DR-based SDA (bug #10)
 - **Timer caching**: Per-frame isRunning() caching is safe; per-cycle is too aggressive (bug #11)
 - **DTC for V1 SPI**: CyOS uses DTC for bulk SPI reads; detect SCR writes + DTCER to trigger (bug #13)
+- **V1 ADC battery check**: CyOS has TWO battery check paths using ch1/ch2 differential.
+  Returning uniform max values (0xFFC0) fails because diff=0. Need ch1 > ch2+15 (bug #14)
+- **V1 service stub harmful**: Unlike V2, V1 CyOS boots without a service stub. Adding one
+  causes battery dialog timer waits to complete instantly, freezing the UI (bug #15)
 
 ## Known Issues
 - **Fn+number keys intermittent**: Number keys (Fn+letter combos) work ~80-90% of the

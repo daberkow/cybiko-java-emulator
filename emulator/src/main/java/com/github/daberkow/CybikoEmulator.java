@@ -56,17 +56,10 @@ public class CybikoEmulator {
     private static final int V2_RF_OBJ = 0x202CB2;  // RF task object (CyOS v1358)
     private final boolean v2ServiceStub;
 
-    // V1: wait_for_state at 0x205018 — equivalent of V2's set_task_state.
-    // Takes ER0=object, R1L=expected_state, ER2=sleep_param.
-    // If obj->state (at obj+0x14) != expected, task is suspended on wait queue.
-    private static final int V1_WAIT_FOR_STATE_ADDR = 0x205018;
-    private static final int V1_STATE_OFFSET = 0x14;
-    // Blacklist of V1 service objects that must NOT be auto-resolved.
-    // RF object causes hardware init failure; others cause data corruption.
-    private static final java.util.Set<Integer> V1_BLOCKED_OBJECTS = java.util.Set.of(
-        0x223186  // RF hardware
-    );
-    private final boolean v1ServiceStub;
+    // V1 note: unlike V2, V1 CyOS boots to final UI without a service stub.
+    // A stub was tested (auto-resolving wait_for_state at 0x205018) but it causes
+    // the battery dialog timer waits to complete instantly, preventing the dialog
+    // from yielding to the OS scheduler. The correct fix was ADC values (see AddressBus).
 
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60;
     private static final int AUTOSAVE_INTERVAL_FRAMES = 60 * 300; // 5 minutes at 60fps
@@ -123,12 +116,6 @@ public class CybikoEmulator {
         // V2 CyOS starts several services that wait on each other; without this,
         // boot stalls before reaching CyOS init.
         v2ServiceStub = (config.type == MachineConfig.MachineType.V2);
-        // V1 service stub disabled: V1 CyOS boots to final UI without it.
-        // The stub auto-resolves wait_for_state calls, but this causes the battery
-        // dialog timer waits to complete instantly, preventing the dialog from
-        // yielding to the OS scheduler. Without the stub, the battery dialog
-        // suspends naturally and CyOS proceeds to render the UI.
-        v1ServiceStub = false;
     }
 
     /** Convenience constructor for XT (backward compatibility). */
@@ -308,23 +295,6 @@ public class CybikoEmulator {
                     if ((isBase || isLate) && currentByte != expectedByte) {
                         bus.write8(obj + V2_STATE_OFFSET, expectedByte);
                         cpu.setCCR(cpu.getCCR() & ~0x80);
-                    }
-                }
-
-                // V1: auto-resolve wait_for_state for services that wait on
-                // unimplemented hardware. Same approach as V2 service stub.
-                if (v1ServiceStub && cpu.getPC() == V1_WAIT_FOR_STATE_ADDR) {
-                    int obj = cpu.getER(0);
-                    int expectedState = cpu.getER(1) & 0xFF;
-                    int currentState = bus.read8(obj + V1_STATE_OFFSET);
-                    if (currentState != expectedState) {
-                        // Blacklist approach: resolve all services except known-bad.
-                        // Wait until frame 420 (after animation) to avoid killing timer interrupts.
-                        boolean resolve = !V1_BLOCKED_OBJECTS.contains(obj)
-                            && expectedState == 0x01 && frameCounter >= 420;
-                        if (resolve) {
-                            bus.write8(obj + V1_STATE_OFFSET, expectedState);
-                        }
                     }
                 }
 
