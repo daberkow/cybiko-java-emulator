@@ -123,7 +123,12 @@ public class CybikoEmulator {
         // V2 CyOS starts several services that wait on each other; without this,
         // boot stalls before reaching CyOS init.
         v2ServiceStub = (config.type == MachineConfig.MachineType.V2);
-        v1ServiceStub = (config.type == MachineConfig.MachineType.V1);
+        // V1 service stub disabled: V1 CyOS boots to final UI without it.
+        // The stub auto-resolves wait_for_state calls, but this causes the battery
+        // dialog timer waits to complete instantly, preventing the dialog from
+        // yielding to the OS scheduler. Without the stub, the battery dialog
+        // suspends naturally and CyOS proceeds to render the UI.
+        v1ServiceStub = false;
     }
 
     /** Convenience constructor for XT (backward compatibility). */

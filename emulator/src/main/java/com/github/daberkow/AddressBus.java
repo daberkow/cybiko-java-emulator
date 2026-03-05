@@ -898,8 +898,6 @@ public class AddressBus {
                     // Fire ADC interrupt (vector 28) if ADIE is enabled
                     if ((value & 0x40) != 0 && cpu != null) {
                         cpu.requestInterrupt(28);
-                        int pc = cpu.getLastStartPC();
-                        System.err.printf("[ADC] Interrupt fired, ADCSR=0x%02X, PC=0x%06X%n", value, pc);
                     }
                 } else {
                     // MAME: ADF cleared only if software writes 0 to bit 7
