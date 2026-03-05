@@ -37,26 +37,35 @@ public class PCF8593Rtc {
     private int pos = 0;            // Current register pointer for send
     private int dataRecvIndex = 0;  // Index into received bytes buffer
     private final int[] dataRecv = new int[50]; // Received bytes buffer
+    private boolean pendingReload = false; // Deferred reload on next STOP
 
     // RTC registers (16 bytes)
     private final int[] data = new int[16];
+    private static final boolean DEBUG = false;
+    private int debugTxnCount = 0;
 
     // Time advancement
     private long lastTickNanos;
     private long nanosAccum = 0;
 
-    private int debugCount = 0;
-
     public PCF8593Rtc() {
-        // Initialize with current system time
+        // Initialize with current system time.
+        // CyOS year encoding: reg7 = toBcd(year - 2000).
+        // CyOS reads: binary = fromBcd(reg7); if != 99 then += 100; year = 1900 + binary.
+        // So reg7=0x26 → 26+100=126 → 1900+126=2026.
         LocalDateTime now = LocalDateTime.now();
         data[0] = 0x00;  // Control: counting enabled
         data[1] = 0x00;  // Hundredths
         data[2] = toBcd(now.getSecond());
         data[3] = toBcd(now.getMinute());
         data[4] = toBcd(now.getHour());
-        data[5] = (((now.getYear() % 4)) << 6) | toBcd(now.getDayOfMonth());
+        int yearInCycle = now.getYear() % 4;
+        data[5] = (yearInCycle << 6) | toBcd(now.getDayOfMonth());
         data[6] = toBcd(now.getMonthValue());
+        // Register 7: CyOS year counter.
+        // CyOS reads: binary = fromBcd(reg7); if (binary != 99) binary += 100;
+        // year = 1900 + binary. So reg7 = toBcd(year - 2000) for years >= 2000.
+        data[7] = toBcd(now.getYear() - 2000);
         lastTickNanos = System.nanoTime();
     }
 
@@ -106,6 +115,24 @@ public class PCF8593Rtc {
         data[5] = ((year % 4) << 6) | (data[5] & 0x3F);
     }
 
+    /**
+     * Reload registers 1-7 with the current system time.
+     * Called when CyOS finishes its boot init (writes 0x04 to reg 0).
+     */
+    private void reloadSystemTime() {
+        LocalDateTime now = LocalDateTime.now();
+        data[1] = 0x00;  // Hundredths
+        data[2] = toBcd(now.getSecond());
+        data[3] = toBcd(now.getMinute());
+        data[4] = toBcd(now.getHour());
+        int yearInCycle = now.getYear() % 4;
+        data[5] = (yearInCycle << 6) | toBcd(now.getDayOfMonth());
+        data[6] = toBcd(now.getMonthValue());
+        data[7] = toBcd(now.getYear() - 2000);
+        lastTickNanos = System.nanoTime();
+        nanosAccum = 0;
+    }
+
     /** Read SDA line state (called from Port F read). */
     public boolean sda_r() {
         return inp != 0;
@@ -136,29 +163,27 @@ public class PCF8593Rtc {
                         // ACK: pull SDA low to acknowledge the received byte
                         inp = 0;
                         int received = dataRecv[dataRecvIndex] & 0xFF;
-                        if (debugCount < 30) {
-                            System.err.printf("[I2C] Received byte 0x%02X (idx=%d)%n", received, dataRecvIndex);
-                        }
                         // First byte 0xA3 = switch to read/send mode
                         if (dataRecv[0] == 0xA3 && dataRecvIndex == 0) {
                             mode = Mode.SEND;
-                            if (debugCount < 30) {
-                                System.err.printf("[I2C] READ mode, sending from pos=%d%n", pos);
-                            }
                         }
                         // First byte 0xA2 + second byte = set register position
                         if (dataRecv[0] == 0xA2 && dataRecvIndex == 1) {
                             pos = dataRecv[1] & 0x0F;
-                            if (debugCount < 30) {
-                                System.err.printf("[I2C] Register pointer = %d%n", pos);
-                            }
                         }
                         // 0xA2 + pos + data bytes = write registers
                         if (dataRecv[0] == 0xA2 && dataRecvIndex >= 2) {
                             int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0x0F;
                             data[rtcPos] = received;
-                            if (debugCount < 30) {
-                                System.err.printf("[I2C] Write reg[%d] = 0x%02X%n", rtcPos, received);
+                            if (DEBUG && debugTxnCount < 50) {
+                                System.err.printf("[RTC] WRITE reg[%d]=0x%02X%n", rtcPos, received);
+                            }
+                            // CyOS boot init resets time to Jan 1, 2000, then writes
+                            // 0x04 to reg 0 to start counting. When we see that write,
+                            // reload the real system time so the "Set Date" screen
+                            // shows the correct date (matching other emulators).
+                            if (rtcPos == 0 && received == 0x04) {
+                                pendingReload = true;
                             }
                         }
                         bits = 0;
@@ -171,8 +196,8 @@ public class PCF8593Rtc {
                     bits++;
                     // After 8 data bits + ACK
                     if (bits > 8) {
-                        if (debugCount < 30) {
-                            System.err.printf("[I2C] Sent byte 0x%02X from pos=%d%n", data[pos], pos);
+                        if (DEBUG && debugTxnCount < 50) {
+                            System.err.printf("[RTC] READ reg[%d]=0x%02X%n", pos, data[pos]);
                         }
                         // Check master ACK/NACK
                         if (pinSda != 0) {
@@ -198,21 +223,29 @@ public class PCF8593Rtc {
         if (pinScl != 0) {
             // START: SDA high -> low while SCL high
             if (state == 0 && pinSda != 0) {
-                if (debugCount++ < 30) {
-                    System.err.println("[I2C] START condition");
-                }
                 active = true;
                 bits = 0;
                 dataRecvIndex = 0;
                 clearBufferRx();
+                if (DEBUG && debugTxnCount < 50) {
+                    System.err.printf("[RTC] --- START (txn %d) ---%n", debugTxnCount);
+                }
             }
             // STOP: SDA low -> high while SCL high
             if (state != 0 && pinSda == 0) {
-                if (debugCount++ < 30) {
-                    System.err.println("[I2C] STOP condition");
-                }
                 active = false;
                 inp = 1; // Release SDA on stop
+                if (DEBUG && debugTxnCount < 50) {
+                    System.err.printf("[RTC] --- STOP (txn %d, pendingReload=%b) ---%n", debugTxnCount, pendingReload);
+                }
+                debugTxnCount++;
+                if (pendingReload) {
+                    pendingReload = false;
+                    reloadSystemTime();
+                    if (DEBUG) {
+                        System.err.printf("[RTC] RELOAD done: reg7=0x%02X reg5=0x%02X reg6=0x%02X%n", data[7], data[5], data[6]);
+                    }
+                }
             }
         }
         pinSda = state;

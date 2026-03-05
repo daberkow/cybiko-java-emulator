@@ -351,6 +351,10 @@ public class AddressBus {
         if (column < 0 || column >= 15) return;
         if (pressed) keyColumns[column] |= bitmask;
         else keyColumns[column] &= ~bitmask;
+        // V1/V2: fire IRQ2 (vector 18) on key press to trigger keyboard scan ISR
+        if (pressed && config.type != MachineConfig.MachineType.XT && cpu != null) {
+            cpu.requestInterrupt(18);
+        }
     }
 
     private int readKeyboard(int address) {
@@ -367,6 +371,7 @@ public class AddressBus {
         }
         return data;
     }
+
 
     // --- On-chip memory and I/O routing ---
 
@@ -606,12 +611,9 @@ public class AddressBus {
         if (address >= 0xFFFF90 && address <= 0xFFFF99) {
             if (address <= 0xFFFF97) {
                 if (config.type != MachineConfig.MachineType.XT) {
-                    // V1/V2: MAME returns 0x0001 for ADC channel 1, 0x0000 for all others
-                    int channel = (address - 0xFFFF90) / 2;
-                    if (channel == 1) {
-                        return (address % 2 == 0) ? 0x00 : 0x01;
-                    }
-                    return 0x00;
+                    // V1/V2: ADC data registers. Return max 10-bit value
+                    // (left-aligned in 16-bit register) = fully charged battery.
+                    return (address % 2 == 0) ? 0xFF : 0xC0;
                 }
                 return (address % 2 == 0) ? 0xCC : 0x00;
             }
@@ -752,12 +754,11 @@ public class AddressBus {
         // Port DDR registers (0xFFFEB0-0xFFFEBF)
         if (address >= 0xFFFEB0 && address <= 0xFFFEBF) {
             onChipRam.write8(onChipOffset(address), value);
-            // Port F DDR (0xFFFEBE) - V1/V2 I2C SDA is controlled via DDR (open-drain).
-            // V1/V2 CyOS toggles SDA by switching DDR bit 0 between output (1=drive low
-            // via DR=0) and input (0=release high via pull-up). This matches MAME's #if 0
-            // block in cybiko_m.cpp: sda_w((data & PF0) ? 0 : 1).
-            // XT uses DR-only I2C (both SCL and SDA from Port F DR writes), handled below.
-            if (address == 0xFFFEBE && config.type != MachineConfig.MachineType.XT) {
+            // Port F DDR (0xFFFEBE) - I2C SDA is controlled via DDR (open-drain)
+            // on ALL variants. CyOS toggles SDA by switching the DDR bit between
+            // output (1=drive low via DR=0) and input (0=release high via pull-up).
+            // V1/V2 use DDR bit 0, XT uses DDR bit 6. SCL uses DR (not DDR).
+            if (address == 0xFFFEBE) {
                 // SDA: DDR bit set = output mode, DR=0 drives SDA LOW
                 //       DDR bit clear = input mode, SDA released HIGH (pull-up)
                 boolean sdaHigh = (value & config.rtcSdaWriteBit) == 0;
@@ -791,16 +792,10 @@ public class AddressBus {
             return;
         }
 
-        // Port F write (0xFFFF6E) - I2C RTC bit-banging
+        // Port F write (0xFFFF6E) - I2C RTC SCL bit-banging
+        // SDA is controlled via DDR (0xFFFEBE) on all variants, not DR.
         if (address == 0xFFFF6E) {
             rtc.scl_w((value & config.rtcSclBit) != 0);
-            if (config.type == MachineConfig.MachineType.XT) {
-                // XT: both SCL and SDA are triggered from Port F DR writes.
-                // SDA write is inverted: writing the bit = pull SDA low.
-                rtc.sda_w((value & config.rtcSdaWriteBit) == 0);
-            }
-            // V1/V2: SDA is controlled via DDR (0xFFFEBE), not DR.
-            // Only SCL comes from DR writes. See Port F DDR handler above.
             onChipRam.write8(onChipOffset(address), value);
             return;
         }

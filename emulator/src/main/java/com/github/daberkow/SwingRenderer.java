@@ -348,6 +348,8 @@ public class SwingRenderer implements FrameBufferRenderer {
                 heldFramesLeft[heldCount] = MIN_HOLD_FRAMES;
                 heldReleasePending[heldCount] = false;
                 heldCount++;
+            } else {
+                System.err.printf("[HOLD] OVERFLOW col=%d bit=0x%X heldCount=%d%n", col, bit, heldCount);
             }
         } else {
             int idx = findHeldKey(col, bit);

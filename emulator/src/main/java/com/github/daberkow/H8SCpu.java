@@ -266,6 +266,7 @@ public class H8SCpu {
 
         int startPC = pc;
         lastStartPC = startPC;
+
         int op = fetch16();
 
         if (tracing) {

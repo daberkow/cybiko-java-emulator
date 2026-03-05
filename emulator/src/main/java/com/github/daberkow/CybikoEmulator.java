@@ -56,6 +56,13 @@ public class CybikoEmulator {
     private static final int V2_RF_OBJ = 0x202CB2;  // RF task object (CyOS v1358)
     private final boolean v2ServiceStub;
 
+    // V1: wait_for_state at 0x205018 — equivalent of V2's set_task_state.
+    // Takes ER0=object, R1L=expected_state, ER2=sleep_param.
+    // If obj->state (at obj+0x14) != expected, task is suspended on wait queue.
+    private static final int V1_WAIT_FOR_STATE_ADDR = 0x205018;
+    private static final int V1_STATE_OFFSET = 0x14;
+    private final boolean v1ServiceStub;
+
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60;
     private static final int AUTOSAVE_INTERVAL_FRAMES = 60 * 300; // 5 minutes at 60fps
 
@@ -111,6 +118,7 @@ public class CybikoEmulator {
         // V2 CyOS starts several services that wait on each other; without this,
         // boot stalls before reaching CyOS init.
         v2ServiceStub = (config.type == MachineConfig.MachineType.V2);
+        v1ServiceStub = (config.type == MachineConfig.MachineType.V1);
     }
 
     /** Convenience constructor for XT (backward compatibility). */
@@ -290,6 +298,28 @@ public class CybikoEmulator {
                     if ((isBase || isLate) && currentByte != expectedByte) {
                         bus.write8(obj + V2_STATE_OFFSET, expectedByte);
                         cpu.setCCR(cpu.getCCR() & ~0x80);
+                    }
+                }
+
+                // V1: auto-resolve wait_for_state for services that wait on
+                // unimplemented hardware. Same approach as V2 service stub.
+                if (v1ServiceStub && cpu.getPC() == V1_WAIT_FOR_STATE_ADDR) {
+                    int obj = cpu.getER(0);
+                    int expectedState = cpu.getER(1) & 0xFF;
+                    int currentState = bus.read8(obj + V1_STATE_OFFSET);
+                    if (currentState != expectedState) {
+                        // Only resolve "service ready" waits (want=0x01), not
+                        // shutdown/reset waits (want=0x00) to avoid flip-flop loops.
+                        // Resolve after animation phase (frame 420+) to avoid
+                        // disrupting early boot. RF object stays blocked.
+                        boolean isRf = (obj == 0x223186);
+                        boolean resolve = !isRf && expectedState == 0x01 && frameCounter >= 420;
+                        if (resolve) {
+                            bus.write8(obj + V1_STATE_OFFSET, expectedState);
+                        }
+                        System.err.printf("[V1-SVC] frame=%d obj=0x%06X state=0x%02X want=0x%02X %s%n",
+                            frameCounter, obj, currentState, expectedState,
+                            resolve ? "RESOLVED" : (isRf ? "RF-BLOCKED" : "BLOCKED"));
                     }
                 }
 
