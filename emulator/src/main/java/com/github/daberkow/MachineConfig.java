@@ -173,7 +173,7 @@ public class MachineConfig {
                 0x40,                      // SDA read = Port F bit 6
                 0xFFFF59,                  // Port A input register
                 0xC0,                      // Power on + battery charged
-                10                         // 10 keyboard scan columns (web emulator fix)
+                10                         // 10 keyboard scan columns
             );
         };
     }

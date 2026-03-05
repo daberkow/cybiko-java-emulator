@@ -224,7 +224,7 @@ public class SwingRenderer implements FrameBufferRenderer {
             case KeyEvent.VK_CONTROL -> { col = 7; bit = 0x8000; } // Fn
             // Column A.8
             case KeyEvent.VK_SHIFT  -> { col = 8; bit = 0x8000; }
-            // Column A.9 - P, period, Help, semicolon (per web emulator)
+            // Column A.9 - P, period, Help, semicolon
             case KeyEvent.VK_END       -> { col = 9; bit = 0x0001; } // Help
             case KeyEvent.VK_PERIOD    -> { col = 9; bit = 0x0002; }
             case KeyEvent.VK_SEMICOLON -> { col = 9; bit = 0x0008; }

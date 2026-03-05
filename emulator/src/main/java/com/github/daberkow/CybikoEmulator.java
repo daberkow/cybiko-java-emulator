@@ -169,6 +169,12 @@ public class CybikoEmulator {
         if (flashRom == null) return;
         int blockOffset = 0x7F800;
         int cyIdOffset = 0x7F818;
+        // V2 flash is only 256KB — config block is at XT offset (512KB), skip
+        if (cyIdOffset + 3 >= flashRom.getRawData().length) {
+            System.err.printf("[RADIO] Flash too small for CyID patch (size=%d, need=%d), skipping%n",
+                    flashRom.getRawData().length, cyIdOffset + 4);
+            return;
+        }
         // Patch directly in raw array (flash is non-writable Memory)
         byte[] raw = flashRom.getRawData();
         raw[cyIdOffset]     = (byte) (cyId >> 24);
@@ -296,9 +302,9 @@ public class CybikoEmulator {
                     // Debug: log only actual state changes
                     if (currentByte != expectedByte) {
                         boolean resolved = isBase || isLate;
-                        System.err.printf("[V2-SVC] frame=%d obj=0x%06X 0x%02X->0x%02X %s%n",
-                            frameCounter, obj, currentByte, expectedByte,
-                            resolved ? "RESOLVED" : (isRf ? "RF-BLOCKED" : "BLOCKED"));
+                        // System.err.printf("[V2-SVC] frame=%d obj=0x%06X 0x%02X->0x%02X %s%n",
+                        //     frameCounter, obj, currentByte, expectedByte,
+                        //     resolved ? "RESOLVED" : (isRf ? "RF-BLOCKED" : "BLOCKED"));
                     }
                     if ((isBase || isLate) && currentByte != expectedByte) {
                         bus.write8(obj + V2_STATE_OFFSET, expectedByte);
@@ -359,9 +365,10 @@ public class CybikoEmulator {
 
             frameCounter++;
 
-            // RAM dump feature: -Dcybiko.ramdump=/path writes external RAM at frame 300
+            // RAM dump feature: -Dcybiko.ramdump=/path writes external RAM at frame N
+            // Optional: -Dcybiko.ramdumpframe=N (default 300)
             String ramdumpPath = System.getProperty("cybiko.ramdump");
-            int ramdumpFrame = 300;
+            int ramdumpFrame = Integer.parseInt(System.getProperty("cybiko.ramdumpframe", "300"));
             if (ramdumpPath != null && frameCounter == ramdumpFrame) {
                 try {
                     Files.write(Path.of(ramdumpPath), externalRam.getRawData());
