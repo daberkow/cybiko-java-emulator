@@ -255,14 +255,19 @@ public class RadioCoProcessor {
             // Short TX DTC frames (e.g. 4-byte init command 01 03 00 00) are
             // AVR commands, not radio packets. Skip network send — they have
             // no RF header and produce 0-byte payloads after stripping.
-            if (data.length <= RF_HEADER_SIZE + 1) return;
+            if (data.length <= RF_HEADER_SIZE + 1) {
+                if (v1Mode && data.length > 0) {
+                    System.err.printf("[RADIO-V1] handleTransmit: DROPPED %d-byte frame (too short for RF header strip)%n", data.length);
+                }
+                return;
+            }
 
-            // Strip RF preamble + sync word (first 8 bytes) and trailing
-            // status byte (last byte). CyOS TX DTC sends frame_size+1 bytes
-            // (50+1=51 for polls, 200+1=201 for scans). The extra byte is a
-            // status/terminator for the AVR, not part of the radio payload.
+            // Strip RF header (first 8 bytes: 4B preamble + 4B CyID).
+            // XT TX DTC sends frame_size+1 bytes (51/201) with a trailing
+            // status byte — strip it. V1 TXI0 sends exactly frame_size bytes
+            // (50/200) with NO trailing byte — don't strip the last byte.
             int start = RF_HEADER_SIZE;
-            int end = data.length - 1; // strip trailing byte
+            int end = v1Mode ? data.length : data.length - 1;
             byte[] payload = java.util.Arrays.copyOfRange(data, start, end);
 
             // Extract channel from the frame content's channel byte (byte 0
@@ -272,6 +277,14 @@ public class RadioCoProcessor {
             // own channel byte ensures the UDP transport channel matches
             // what CyOS wrote into the frame content.
             int frameChannel = payload[0] & 0x3F;
+            if (v1Mode) {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < Math.min(data.length, 20); i++) {
+                    sb.append(String.format("%02X ", data[i] & 0xFF));
+                }
+                System.err.printf("[RADIO-V1] handleTransmit: SENT %d raw → %d payload, ch=%d: %s%n",
+                        data.length, payload.length, frameChannel, sb.toString().trim());
+            }
             transport.sendPacket(payload, frameChannel);
         }
     }
@@ -507,6 +520,18 @@ public class RadioCoProcessor {
         if (!v1DataAccumulating) return;
         v1DataAccumulating = false;
         byte[] data = java.util.Arrays.copyOf(v1DataBuffer, v1DataPos);
+
+        // Log ALL TX data (not just when frames are ready)
+        if (v1DataPos > 0) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(v1DataPos, 30); i++) {
+                sb.append(String.format("%02X ", data[i] & 0xFF));
+            }
+            System.err.printf("[RADIO-V1] v1TxComplete: %d bytes, cmd=%s: %s%n",
+                    v1DataPos, lastCommandType == CMD_POLL ? "POLL" : "SCAN",
+                    sb.toString().trim());
+        }
+
         handleTransmit(data);
 
         // Queue 0x03 ACK (RXI0 state 9 expects this → completion handler)

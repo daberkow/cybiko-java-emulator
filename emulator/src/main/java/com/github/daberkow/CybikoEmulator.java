@@ -638,6 +638,11 @@ public class CybikoEmulator {
             // 0x49AF08 rejects frames from devices with the same CyID.
             // Using the transport ID as the CyID makes senderId == CyID.
             emu.patchCyId(id);
+            // V1: CyID is in compressed SPI flash (patchCyId is no-op), so we
+            // patch it in RAM after CyOS decompresses. Pass id to AddressBus.
+            if (config.type == MachineConfig.MachineType.V1) {
+                emu.getBus().setV1RadioId(id);
+            }
             try {
                 if ("lan".equals(radioMode)) {
                     UdpMulticastTransport udp = new UdpMulticastTransport(id);

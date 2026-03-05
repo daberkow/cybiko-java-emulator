@@ -11,7 +11,7 @@ After getting the base emulator working, I went about adding new features like a
 | Core (boot to interactive UI) | Yes | Partial (stalls at logo) | Yes |
 | Sound (1-bit PWM speaker) | Yes | Yes | Yes |
 | MP3 Player | No | No | No |
-| Radio (LAN/SDR networking) | Yes | No (RF init blocked) | Yes (peer discovery + chat) |
+| Radio (LAN/SDR networking) | Yes | No (RF init blocked) | Yes |
 | RTC (real-time clock) | Partial | Partial | Partial |
 | App Loading (CFS + NVRAM) | Yes | Yes | Yes |
 | Keyboard | Yes | Yes | Yes |

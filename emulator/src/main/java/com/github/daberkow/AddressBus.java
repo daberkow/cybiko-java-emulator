@@ -131,10 +131,15 @@ public class AddressBus {
     private int v1PollFrameCounter = 0;
     private int v1PollScanAlternator = 0; // 0-3: poll, 4: scan (4:1 ratio)
     private static final int V1_POLL_INTERVAL = 15; // frames between poll/scan (4/sec)
+    private boolean v1DriverInitiatedTx = false; // True when tickV1Radio started this TX cycle
     // Saved connObj address: the completion handler frees connObj to pool +0x32F0
     // and allocates from pool +0x32C8 (which is empty → returns NULL). We save
     // the original address and restore it each cycle.
     private int v1SavedConnObj = 0;
+    private int v1RadioId = 0; // Radio device ID for CyID patching (0 = no patch)
+    private boolean v1CyIdPatched = false; // True after CyID patched in RAM
+    // V1 CyID cached at this RAM address (CyOS v1246 specific)
+    private static final int V1_CYID_RAM_ADDR = 0x21F9DC;
     // Initial delay: wait for CyOS to fully boot (memmgr, allocator ready).
     // Radio init fires during early boot (~frame 400), but we need the heap
     // allocator at 0x212D9A to be ready. 2M cycles ≈ 11 frames at 11.06MHz.
@@ -179,6 +184,7 @@ public class AddressBus {
     public void setTimer8_1(H8STimer8 timer) { this.timer8_1 = timer; }
     public void setTimer16(int ch, H8STimer16 timer) { timer16[ch] = timer; }
     public void setSpiFlash(AT45DB041Flash flash) { this.spiFlash = flash; }
+    public void setV1RadioId(int id) { this.v1RadioId = id; }
     public void setRadio(RadioCoProcessor radio) {
         this.radio = radio;
         // XT uses SCI2 for radio, V1/V2 use SCI0
@@ -315,9 +321,9 @@ public class AddressBus {
      * after init. Without periodic tick calls, the radio never enters state 7
      * (TX command) and never starts poll/scan cycles. We emulate the tick
      * function's effect by directly setting up the radio state machine fields:
-     *   - Command byte (obj+0x336E): 0x30 (poll) or 0xCF (scan)
-     *   - Param byte (obj+0x336F): current channel from obj+0x3371
-     *   - TX pointers: txEnd = txPtr (state 2 sends 1 garbage byte then state 9)
+     *   - Command byte (obj+0x336E): 0x30 (poll) or 0xCF (scan), from connObj+0xD2
+     *   - Param byte (obj+0x336F): bit 3 of connObj+0x09
+     *   - TX pointers: txPtr=connObj, txEnd=connObj+50 (poll) or connObj+200 (scan)
      *   - State = 7 (triggers TXI0 to send command sequence)
      *   - TIE enabled in SCR (starts TXI0 interrupt chain)
      *
@@ -359,37 +365,96 @@ public class AddressBus {
         }
         if (connObj == 0) return; // No connObj available
 
+        // Patch CyID: replace the ROM default with radio-id so each V1 emulator
+        // has a unique identity. Patch both the RAM cache (for incoming frame
+        // matching) and the connObj beacon frame (for outgoing CyID).
+        if (!v1CyIdPatched && v1RadioId != 0) {
+            // Patch cached CyID in RAM (0x21F9DC for CyOS v1246)
+            write8(V1_CYID_RAM_ADDR, (v1RadioId >> 24) & 0xFF);
+            write8(V1_CYID_RAM_ADDR + 1, (v1RadioId >> 16) & 0xFF);
+            write8(V1_CYID_RAM_ADDR + 2, (v1RadioId >> 8) & 0xFF);
+            write8(V1_CYID_RAM_ADDR + 3, v1RadioId & 0xFF);
+            v1CyIdPatched = true;
+            System.out.printf("Patched V1 CyID in RAM: 0x%08X%n", v1RadioId);
+        }
+        // Populate connObj beacon frame data. CyOS never calls tick() to prepare
+        // the beacon, so we fill in the required fields matching the RF frame format
+        // (see docs/rf2915-research.md). Only done once after CyID patching.
+        if (v1RadioId != 0) {
+            // Bytes 0-3: preamble (already FF FF FF FF from init)
+            // Bytes 4-7: CyID
+            write8(connObj + 4, (v1RadioId >> 24) & 0xFF);
+            write8(connObj + 5, (v1RadioId >> 16) & 0xFF);
+            write8(connObj + 6, (v1RadioId >> 8) & 0xFF);
+            write8(connObj + 7, v1RadioId & 0xFF);
+            // Byte 8: channel byte (set below based on current channel)
+            // Byte 9: frame type = 0x01 (beacon/presence)
+            write8(connObj + 9, 0x01);
+            // Byte 16: 0x2A (42 decimal, payload length marker)
+            write8(connObj + 16, 0x2A);
+            // Bytes 20-27: username (default "unknown\0" if not set)
+            // CyOS V1 default username is "g" per user observation
+            if (read8(connObj + 20) == 0x00) {
+                // Only set if not already populated by CyOS
+                byte[] defaultName = "Cybiko\0\0".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                for (int i = 0; i < defaultName.length && i < 8; i++) {
+                    write8(connObj + 20 + i, defaultName[i] & 0xFF);
+                }
+            }
+        }
+
         // Reset txPtr to connObj (completion handler clears it to 0)
         write8(radioObjAddr + 0x3350, (connObj >> 24) & 0xFF);
         write8(radioObjAddr + 0x3351, (connObj >> 16) & 0xFF);
         write8(radioObjAddr + 0x3352, (connObj >> 8) & 0xFF);
         write8(radioObjAddr + 0x3353, connObj & 0xFF);
 
-        // Alternate poll (0x30) and scan (0xCF) with 4:1 ratio
+        // Determine poll vs scan from connObj+0xD2 (matching tick at 0x2147E4):
+        // connObj+0xD2 != 0 → poll (0x30, 50 bytes); == 0 → scan (0xCF, 200 bytes)
+        // If connObj+0xD2 isn't set, fall back to our alternating pattern.
+        int connD2 = read8(connObj + 0xD2);
         int cmd;
-        if (v1PollScanAlternator >= 4) {
-            cmd = 0xCF; // Scan
-            v1PollScanAlternator = 0;
-        } else {
+        int txSize;
+        if (connD2 != 0) {
             cmd = 0x30; // Poll
-            v1PollScanAlternator++;
+            txSize = 50;
+        } else {
+            // Use alternating pattern when connObj+0xD2 is 0
+            if (v1PollScanAlternator >= 4) {
+                cmd = 0xCF; // Scan
+                txSize = 200;
+                v1PollScanAlternator = 0;
+            } else {
+                cmd = 0x30; // Poll
+                txSize = 50;
+                v1PollScanAlternator++;
+            }
         }
 
-        // Read current channel
-        int channel = read8(radioObjAddr + 0x3371);
+        // Read current channel (use connObj+0xD4 if set, else radioObj+0x3371)
+        int connD4 = read8(connObj + 0xD4);
+        int channel = (connD4 != 0) ? connD4 : read8(radioObjAddr + 0x3371);
+
+        // Update channel byte in beacon frame (offset 8: 0xC0 | channel)
+        write8(connObj + 8, 0xC0 | (channel & 0x3F));
 
         // Set up command and param bytes
         write8(radioObjAddr + 0x336E, cmd);
-        write8(radioObjAddr + 0x336F, channel);
+        // Param byte: bit 3 of connObj+0x09 (matching tick at 0x214800)
+        int connObj09 = read8(connObj + 0x09);
+        write8(radioObjAddr + 0x336F, (connObj09 >> 3) & 0x01);
 
-        // Set txEnd = txPtr (= connObj) so state 2 transitions after 1 byte
-        write8(radioObjAddr + 0x3354, (connObj >> 24) & 0xFF);
-        write8(radioObjAddr + 0x3355, (connObj >> 16) & 0xFF);
-        write8(radioObjAddr + 0x3356, (connObj >> 8) & 0xFF);
-        write8(radioObjAddr + 0x3357, connObj & 0xFF);
+        // Set txEnd = connObj + txSize (matching tick at 0x2147DC)
+        // Real tick function sends 50 bytes for poll, 200 for scan FROM connObj
+        int txEnd = connObj + txSize;
+        write8(radioObjAddr + 0x3354, (txEnd >> 24) & 0xFF);
+        write8(radioObjAddr + 0x3355, (txEnd >> 16) & 0xFF);
+        write8(radioObjAddr + 0x3356, (txEnd >> 8) & 0xFF);
+        write8(radioObjAddr + 0x3357, txEnd & 0xFF);
 
         // Set state = 7 (TX command byte)
         write8(radioObjAddr + V1_STATE_OFFSET, 7);
+        v1DriverInitiatedTx = true;
 
         // Enable TIE in SCR and schedule first TXI0
         sci0Scr |= 0x80;
@@ -988,11 +1053,18 @@ public class AddressBus {
                 boolean tieWasOff = (oldScr & 0x80) == 0;
                 if (tieEnabled && sci0Tdre && (tieWasOff || sci0TxiDelay == 0)) {
                     sci0TxiDelay = SCI0_TXI_DELAY;
+                    if (!v1DriverInitiatedTx && v1RadioBootstrapped) {
+                        System.err.printf("[RADIO-V1] CyOS enabled TIE (CyOS-initiated TX start)%n");
+                    }
                 }
                 // V1: TIE 1→0 = TXI0 state 9 disabled TIE after TX complete.
                 // Process accumulated poll/scan data and queue the response.
                 boolean tieCleared = (oldScr & 0x80) != 0 && (sci0Scr & 0x80) == 0;
                 if (tieCleared && radio != null && config.type == MachineConfig.MachineType.V1) {
+                    if (!v1DriverInitiatedTx) {
+                        System.err.printf("[RADIO-V1] CyOS-initiated TX complete (not from tickV1Radio)%n");
+                    }
+                    v1DriverInitiatedTx = false;
                     radio.v1TxComplete();
                 }
             }
