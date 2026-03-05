@@ -56,10 +56,18 @@ public class CybikoEmulator {
     private static final int V2_RF_OBJ = 0x202CB2;  // RF task object (CyOS v1358)
     private final boolean v2ServiceStub;
 
-    // V1 note: unlike V2, V1 CyOS boots to final UI without a service stub.
-    // A stub was tested (auto-resolving wait_for_state at 0x205018) but it causes
-    // the battery dialog timer waits to complete instantly, preventing the dialog
-    // from yielding to the OS scheduler. The correct fix was ADC values (see AddressBus).
+    // V1 note: unlike V2, V1 CyOS boots to final UI without a full service stub.
+    // A full stub (auto-resolving all wait_for_state at 0x205018) causes the battery
+    // dialog timer waits to complete instantly, preventing the dialog from yielding
+    // to the OS scheduler. The correct fix was ADC values (see AddressBus).
+    // When radio is connected, we intercept set_task_state (0x205088) to resolve
+    // the RF service after boot stabilizes. set_task_state's own wake-up logic
+    // properly wakes the suspended RF task from the wait queue.
+    private static final int V1_SET_TASK_STATE_ADDR = 0x205088;
+    private static final int V1_STATE_OFFSET = 0x14;
+    private static final int V1_RF_OBJECT = 0x223186;
+    private boolean v1RadioStub = false; // Enabled when --radio used with V1
+    private boolean v1RfResolved = false; // One-shot: resolve RF service once
 
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60;
     private static final int AUTOSAVE_INTERVAL_FRAMES = 60 * 300; // 5 minutes at 60fps
@@ -298,8 +306,24 @@ public class CybikoEmulator {
                     }
                 }
 
+                // V1 radio: intercept set_task_state to resolve RF service.
+                // We hijack any set_task_state call after frame 540 to also set
+                // the RF object's state. set_task_state's wake-up logic then
+                // properly wakes the RF task from the wait queue.
+                if (v1RadioStub && !v1RfResolved && frameCounter >= 540
+                        && cpu.getPC() == V1_SET_TASK_STATE_ADDR) {
+                    int rfState = bus.read8(V1_RF_OBJECT + V1_STATE_OFFSET);
+                    if (rfState != 0x01) {
+                        bus.write8(V1_RF_OBJECT + V1_STATE_OFFSET, 0x01);
+                        v1RfResolved = true;
+                        System.err.printf("[V1-RADIO] Resolved RF service 0x%06X at frame %d%n",
+                                V1_RF_OBJECT, frameCounter);
+                    }
+                }
+
                 cpu.step();
                 bus.tickDtcCompletion();
+                bus.tickSci0();
                 bus.tickSci2();
                 totalSteps++;
 
@@ -321,6 +345,9 @@ public class CybikoEmulator {
 
             // Tick radio co-processor (heartbeat beacons)
             if (radio != null) radio.tick();
+
+            // V1: drive poll/scan cycles (CyOS doesn't call tick function)
+            if (v1RadioStub) bus.tickV1Radio();
 
             // Print serial output from boot loader / CyOS
             for (int sci = 0; sci < 3; sci++) {
@@ -622,6 +649,10 @@ public class CybikoEmulator {
                     sdr.start();
                     emu.getRadio().setTransport(sdr);
                     Runtime.getRuntime().addShutdownHook(new Thread(sdr::close));
+                }
+                // V1: enable targeted RF service resolution so radio task starts
+                if (config.type == MachineConfig.MachineType.V1) {
+                    emu.v1RadioStub = true;
                 }
             } catch (IOException e) {
                 System.err.println("Warning: Radio transport not available: " + e.getMessage());

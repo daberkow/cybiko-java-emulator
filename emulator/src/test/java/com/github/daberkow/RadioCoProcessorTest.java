@@ -16,7 +16,7 @@ class RadioCoProcessorTest {
         assertEquals(0xFF, radio.transfer(0x01)); // byte 1 of 3, 0xFF idle
         assertEquals(0xFF, radio.transfer(0x04)); // byte 2 of 3, 0xFF idle
         int response = radio.transfer(0x00);      // byte 3 of 3, triggers response
-        assertEquals(0x00, response);             // ACK
+        assertEquals(0x03, response);             // ACK (V1 RXI0 state 9 expects 0x03)
         assertTrue(radio.isInitialized());
     }
 
@@ -49,7 +49,7 @@ class RadioCoProcessorTest {
         radio.transfer(0x01);
         radio.transfer(0x03);
         int response = radio.transfer(0x00);
-        assertEquals(0x00, response); // ACK
+        assertEquals(0x03, response); // ACK
     }
 
     @Test void v1SecondCommandDoesNotInitialize() {
@@ -84,7 +84,7 @@ class RadioCoProcessorTest {
         radio.transfer(0x01);
         radio.transfer(0xFE); // unknown sub-command
         int response = radio.transfer(0x00);
-        assertEquals(0x00, response); // Generic ACK (3-byte commands still ACK)
+        assertEquals(0x03, response); // Generic ACK (3-byte commands still ACK)
     }
 
     @Test void partialCommandNoResponse() {
@@ -101,13 +101,13 @@ class RadioCoProcessorTest {
         radio.transfer(0x01);
         radio.transfer(0x04);
         int r1 = radio.transfer(0x00);
-        assertEquals(0x00, r1);
+        assertEquals(0x03, r1);
 
         // Second command: set channel
         radio.transfer(0x01);
         radio.transfer(0x02);
         int r2 = radio.transfer(0x07);
-        assertEquals(0x00, r2);
+        assertEquals(0x03, r2);
         assertEquals(7, radio.getCurrentChannel());
     }
 
@@ -135,14 +135,14 @@ class RadioCoProcessorTest {
         radio.transfer(0x01);
         radio.transfer(0x04);
         int ack1 = radio.transfer(0x00);
-        assertEquals(0x00, ack1);
+        assertEquals(0x03, ack1);
         assertTrue(radio.isInitialized());
 
         // Second command: 01 02 02
         radio.transfer(0x01);
         radio.transfer(0x02);
         int ack2 = radio.transfer(0x02);
-        assertEquals(0x00, ack2);
+        assertEquals(0x03, ack2);
         assertEquals(2, radio.getCurrentChannel());
     }
 
@@ -154,7 +154,7 @@ class RadioCoProcessorTest {
         radio.transfer(0x01);
         radio.transfer(0x02);
         int ack1 = radio.transfer(0x02);
-        assertEquals(0x00, ack1);
+        assertEquals(0x03, ack1);
         assertTrue(radio.isInitialized());
         assertEquals(2, radio.getCurrentChannel());
 
@@ -162,7 +162,7 @@ class RadioCoProcessorTest {
         radio.transfer(0x01);
         radio.transfer(0x03);
         int ack2 = radio.transfer(0x00);
-        assertEquals(0x00, ack2);
+        assertEquals(0x03, ack2);
     }
 
     @Test void channelChangeUpdatesChannel() {
@@ -186,7 +186,7 @@ class RadioCoProcessorTest {
         radio.transfer(0x101); // should be treated as 0x01
         radio.transfer(0x204); // should be treated as 0x04
         int response = radio.transfer(0x300); // should be treated as 0x00
-        assertEquals(0x00, response); // ACK for init command
+        assertEquals(0x03, response); // ACK for init command
         assertTrue(radio.isInitialized());
     }
 
@@ -201,7 +201,7 @@ class RadioCoProcessorTest {
         // Then a 3-byte init command — should still work
         radio.transfer(0x01);
         radio.transfer(0x04);
-        assertEquals(0x00, radio.transfer(0x00));
+        assertEquals(0x03, radio.transfer(0x00));
         assertTrue(radio.isInitialized());
     }
 
@@ -245,7 +245,7 @@ class RadioCoProcessorTest {
         // 3-byte channel change still works
         radio.transfer(0x01);
         radio.transfer(0x02);
-        assertEquals(0x00, radio.transfer(0x07));
+        assertEquals(0x03, radio.transfer(0x07));
         assertEquals(7, radio.getCurrentChannel());
     }
 

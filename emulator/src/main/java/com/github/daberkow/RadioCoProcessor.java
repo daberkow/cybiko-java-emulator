@@ -60,6 +60,19 @@ public class RadioCoProcessor {
     private static final int CMD_SCAN = 2;  // 0xCF: any frame
     private int lastCommandType = CMD_NONE;
 
+    // V1 mode: enables byte-by-byte data accumulation after poll/scan commands.
+    // On V1, CyOS sends frame data via TXI0 interrupts (not DTC). Set by AddressBus
+    // when the machine type is V1. When false (XT/V2), data comes via DTC and
+    // processCommand2 does not start accumulation.
+    private boolean v1Mode = false;
+
+    // V1 data accumulation: after poll/scan 2-byte command, V1 sends frame data
+    // byte-by-byte via TXI0 (unlike XT which uses TX DTC). We accumulate these
+    // bytes and process them when TXI0 state 9 disables TIE.
+    private boolean v1DataAccumulating = false;
+    private byte[] v1DataBuffer = new byte[210]; // max scan payload: 201 bytes
+    private int v1DataPos = 0;
+
     // Set by completeTxDtc() or tryAsyncDelivery() to indicate a frame is
     // ready for delivery. Consumed by prepareRxFrame() to decide whether
     // to dequeue.
@@ -82,6 +95,15 @@ public class RadioCoProcessor {
      * @param value byte sent from CPU
      */
     public void receive(int value) {
+        // V1 data accumulation: after poll/scan command, subsequent bytes are
+        // frame data sent via TXI0 state 2 (byte-by-byte, not DTC).
+        if (v1DataAccumulating) {
+            if (v1DataPos < v1DataBuffer.length) {
+                v1DataBuffer[v1DataPos++] = (byte) (value & 0xFF);
+            }
+            return;
+        }
+
         cmdBuffer[cmdPos++] = value & 0xFF;
 
         // Determine command length from first byte
@@ -137,6 +159,11 @@ public class RadioCoProcessor {
      */
     public int read() {
         return rxQueue.isEmpty() ? 0xFF : rxQueue.poll();
+    }
+
+    /** Enable V1 mode: byte-by-byte data accumulation after poll/scan commands. */
+    public void setV1Mode(boolean v1) {
+        this.v1Mode = v1;
     }
 
     /** Returns true if the co-processor has received an init or channel command. */
@@ -286,6 +313,7 @@ public class RadioCoProcessor {
      *         that CyOS rejects quickly (destination 0x00000000, not broadcast).
      */
     public int completeTxDtc() {
+        v1DataAccumulating = false; // Reset — XT uses DTC path, not byte accumulation
         rxFrameReady = false;
         // On real hardware, the AVR/RF2915 has natural RF round-trip delay
         // (microseconds) before responding. Over UDP, frames from the peer
@@ -466,6 +494,61 @@ public class RadioCoProcessor {
     }
 
     /**
+     * Called by AddressBus when V1 TXI0 state 9 disables TIE, signaling TX
+     * complete. Processes the accumulated data bytes, sends over network,
+     * and queues the full response sequence for byte-by-byte RXI0 delivery:
+     *   1. 0x03 (packet ACK) — consumed by RXI0 state 9 → completion handler
+     *   2. Frame indicator (0x32/0xC8) — consumed by RXI0 state 1 → frame handler
+     *   3. Frame data (50/200 bytes) — consumed by RXI0 state 5 → frame complete
+     *
+     * This is the V1 equivalent of XT's completeTxDtc() + deferred delivery.
+     */
+    public void v1TxComplete() {
+        if (!v1DataAccumulating) return;
+        v1DataAccumulating = false;
+        byte[] data = java.util.Arrays.copyOf(v1DataBuffer, v1DataPos);
+        handleTransmit(data);
+
+        // Queue 0x03 ACK (RXI0 state 9 expects this → completion handler)
+        rxQueue.add(0x03);
+
+        // Wait for received frames (same as completeTxDtc)
+        rxFrameReady = false;
+        if (receivedFrames.isEmpty() && transport != null) {
+            synchronized (receivedFrames) {
+                if (receivedFrames.isEmpty()) {
+                    try { receivedFrames.wait(15); } catch (InterruptedException ignored) {}
+                }
+            }
+        }
+
+        // Determine frame indicator
+        int indicator;
+        if (receivedFrames.isEmpty()) {
+            indicator = 0x32; // Null frame — 50 bytes
+        } else {
+            ReceivedFrame next = receivedFrames.peek();
+            if (lastCommandType == CMD_POLL && next.data().length > 50) {
+                indicator = 0x32; // Large frame waits for scan mode
+            } else {
+                indicator = (next.data().length > 50) ? 0xC8 : 0x32;
+                rxFrameReady = true;
+            }
+        }
+        rxQueue.add(indicator);
+
+        // Queue frame data bytes for byte-by-byte delivery via RXI0 state 5
+        int count = (indicator == 0xC8) ? 200 : 50;
+        prepareRxFrame(count);
+
+        // Log only when there's actual data (not the periodic null polls)
+        if (rxFrameReady) {
+            System.err.printf("[RADIO-V1] TX complete: %d data bytes, indicator=0x%02X, frame ready%n",
+                    v1DataPos, indicator);
+        }
+    }
+
+    /**
      * Process a complete 3-byte command (header 0x01) and queue the response.
      *
      * @param header first byte (always 0x01)
@@ -475,8 +558,12 @@ public class RadioCoProcessor {
     private void processCommand(int header, int cmd, int param) {
         switch (cmd) {
             case 0x04 -> {
-                // Init command (V2 first boot sequence)
-                rxQueue.add(0x00); // ACK
+                // Init command (V1/V2 first boot sequence).
+                // V1 re-init handler (0x214590) sends this via polled SCI0 when
+                // obj+0x3375 is set. Clear rxQueue to avoid stale ACK bytes
+                // interfering with the subsequent poll/scan cycle.
+                rxQueue.clear();
+                rxQueue.add(0x03); // ACK (V1 RXI0 state 9 expects 0x03)
                 initialized = true;
             }
             case 0x02 -> {
@@ -485,16 +572,16 @@ public class RadioCoProcessor {
                 if (transport != null) {
                     transport.setChannel(param);
                 }
-                rxQueue.add(0x00); // ACK
+                rxQueue.add(0x03); // ACK
                 initialized = true;
             }
             case 0x03 -> {
                 // V1 second init command
-                rxQueue.add(0x00); // ACK
+                rxQueue.add(0x03); // ACK
             }
             default -> {
                 // Unknown command, ACK to avoid blocking caller
-                rxQueue.add(0x00);
+                rxQueue.add(0x03);
             }
         }
     }
@@ -511,12 +598,17 @@ public class RadioCoProcessor {
      */
     private void processCommand2(int header, int param) {
         if (header == 0x30) {
-            // Poll command — CyOS will follow with TX DTC payload
+            // Poll command — CyOS will follow with TX DTC payload (XT)
+            // or TXI0 byte-by-byte data (V1).
             lastCommandType = CMD_POLL;
+            if (v1Mode) { v1DataAccumulating = true; v1DataPos = 0; }
         } else if (header == 0xCF) {
-            // Scan/beacon command — CyOS will follow with TX DTC payload.
+            // Scan/beacon command — CyOS will follow with TX DTC payload (XT)
+            // or TXI0 byte-by-byte data (V1).
             lastCommandType = CMD_SCAN;
+            if (v1Mode) { v1DataAccumulating = true; v1DataPos = 0; }
         }
         // No immediate response queued — response comes from DTC completion path
+        // (XT) or v1TxComplete() when TIE is disabled (V1).
     }
 }

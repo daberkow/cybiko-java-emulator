@@ -58,6 +58,7 @@ public class AddressBus {
     // SCI0 register access log (captures ALL SCI0 interactions: config + data)
     private final List<String> sci0RegLog = new ArrayList<>();
     public List<String> getSci0RegLog() { return sci0RegLog; }
+    public boolean isV1RadioBootstrapped() { return v1RadioBootstrapped; }
     // SCI2 register access log
     private final List<String> sci2RegLog = new ArrayList<>();
     public List<String> getSci2RegLog() { return sci2RegLog; }
@@ -93,6 +94,15 @@ public class AddressBus {
     private int sci0Rdr = 0;       // SCI0 receive data register (byte from radio)
     private boolean sci0Rdrf = false; // SCI0 receive data register full
 
+    // SCI0 interrupt-driven protocol state (V1/V2 radio)
+    // V1 uses SCI0 in interrupt mode: TXI0 (vector 82) and RXI0 (vector 81) drive
+    // the radio state machine. Boot ROM has trampolines that indirect through on-chip
+    // RAM function pointers (0xFFEC88-0xFFEC94).
+    private int sci0Scr = 0;           // Cached SCI0 SCR register value
+    private boolean sci0Tdre = true;   // SCI0 TDRE flag (transmitter data register empty)
+    private int sci0TxiDelay = 0;      // Countdown cycles until next TXI0 fires (0 = none pending)
+    private static final int SCI0_TXI_DELAY = 32; // Cycles between TXI0 fires (~byte transmission time)
+
     // SCI2 interrupt-driven protocol state (XT radio)
     private int sci2Scr = 0;           // Cached SCI2 SCR register value
     private boolean sci2Tdre = true;   // SCI2 TDRE flag (transmitter data register empty)
@@ -105,6 +115,40 @@ public class AddressBus {
     // for frame delivery without significant per-cycle overhead.
     private static final int ASYNC_RADIO_CHECK_INTERVAL = 512;
     private int asyncRadioCheckCountdown = 0;
+
+    // V1 radio bootstrap: connObj is NULL at init and only allocated by the
+    // completion handler (0x214876) or frame complete handler (0x2146C8), both of
+    // which require an interrupt-driven cycle that needs connObj — chicken-and-egg.
+    // We break this by setting state=9 and injecting 0x03 ACK, which triggers the
+    // completion handler to allocate connObj. Must avoid re-injecting while the
+    // handler is executing (race condition corrupts state).
+    private boolean v1RadioBootstrapped = false;
+    private int v1BootstrapDelay = 0; // Countdown before bootstrap attempt
+    private boolean v1BootstrapPending = false; // True while waiting for handler to finish
+    // V1 radio poll/scan driver: CyOS never calls the tick function (0x214760)
+    // to start poll/scan TX cycles. We drive the radio by directly setting up
+    // the state machine fields and enabling TIE every V1_POLL_INTERVAL frames.
+    private int v1PollFrameCounter = 0;
+    private int v1PollScanAlternator = 0; // 0-3: poll, 4: scan (4:1 ratio)
+    private static final int V1_POLL_INTERVAL = 15; // frames between poll/scan (4/sec)
+    // Saved connObj address: the completion handler frees connObj to pool +0x32F0
+    // and allocates from pool +0x32C8 (which is empty → returns NULL). We save
+    // the original address and restore it each cycle.
+    private int v1SavedConnObj = 0;
+    // Initial delay: wait for CyOS to fully boot (memmgr, allocator ready).
+    // Radio init fires during early boot (~frame 400), but we need the heap
+    // allocator at 0x212D9A to be ready. 2M cycles ≈ 11 frames at 11.06MHz.
+    private static final int V1_BOOTSTRAP_INITIAL_DELAY = 2_000_000;
+    // Retry delay: if handler didn't allocate connObj, wait before retrying.
+    // Must be long enough for the completion handler to fully execute (~1000 insns).
+    private static final int V1_BOOTSTRAP_RETRY_DELAY = 500_000;
+
+    // V1 radio object address (CyOS v1246 specific). The pointer to the radio
+    // object is stored at this fixed address in decompressed CyOS code.
+    private static final int V1_RADIO_OBJ_PTR_ADDR = 0x21F216;
+    // V1 radio object field offsets
+    private static final int V1_STATE_OFFSET = 0x3370;
+    private static final int V1_CONNOBJ_OFFSET = 0x3344;
 
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
@@ -139,6 +183,10 @@ public class AddressBus {
         this.radio = radio;
         // XT uses SCI2 for radio, V1/V2 use SCI0
         this.radioSciChannel = (config.type == MachineConfig.MachineType.XT) ? 2 : 0;
+        // V1 uses byte-by-byte data accumulation (no DTC for radio)
+        if (config.type == MachineConfig.MachineType.V1) {
+            radio.setV1Mode(true);
+        }
     }
 
     /**
@@ -158,7 +206,200 @@ public class AddressBus {
     }
 
     /**
-     * Tick SCI2 interrupt generation. Call from main loop after each cpu.step().
+     * Tick SCI0 interrupt generation. Call from main loop after each cpu.step().
+     * V1/V2 use SCI0 for radio with interrupt-driven protocol:
+     *   TXI0 (vector 82): fires when TDRE becomes set and TIE is enabled
+     *   RXI0 (vector 81): fires when RDRF becomes set and RIE is enabled
+     * H8S/2241 SCI0 vectors: ERI0=80, RXI0=81, TXI0=82, TEI0=83
+     */
+    public void tickSci0() {
+        if (sci0TxiDelay > 0) {
+            sci0TxiDelay--;
+            if (sci0TxiDelay == 0) {
+                sci0Tdre = true;
+                // Fire TXI0 if TIE is enabled in SCR
+                if ((sci0Scr & 0x80) != 0 && cpu != null) {
+                    cpu.requestInterrupt(82); // TXI0
+                }
+            }
+        }
+        // RXI0: deliver radio response to RDR when RDRF is clear
+        if (radio != null && radioSciChannel == 0 && !sci0Rdrf && radio.hasData()) {
+            sci0Rdr = radio.read();
+            sci0Rdrf = true;
+            // Fire RXI0 if RIE is enabled in SCR
+            if ((sci0Scr & 0x40) != 0 && cpu != null) {
+                cpu.requestInterrupt(81); // RXI0
+            }
+        }
+        // V1 radio bootstrap: allocate connObj by simulating a TX+ACK cycle.
+        // On real hardware, the AVR co-processor's boot response triggers connObj
+        // allocation. We emulate this by setting state=9 and injecting 0x03 ACK.
+        if (radio != null && radioSciChannel == 0
+                && config.type == MachineConfig.MachineType.V1
+                && !v1RadioBootstrapped && radio.isInitialized()) {
+            v1BootstrapDelay++;
+            int delay = v1BootstrapPending ? V1_BOOTSTRAP_RETRY_DELAY : V1_BOOTSTRAP_INITIAL_DELAY;
+            if (v1BootstrapDelay >= delay) {
+                v1BootstrapDelay = 0;
+                int radioObjAddr = (read8(V1_RADIO_OBJ_PTR_ADDR) << 24)
+                        | (read8(V1_RADIO_OBJ_PTR_ADDR + 1) << 16)
+                        | (read8(V1_RADIO_OBJ_PTR_ADDR + 2) << 8)
+                        | read8(V1_RADIO_OBJ_PTR_ADDR + 3);
+                if (radioObjAddr >= 0x200000 && radioObjAddr < 0x280000) {
+                    int connObj = (read8(radioObjAddr + V1_CONNOBJ_OFFSET) << 24)
+                            | (read8(radioObjAddr + V1_CONNOBJ_OFFSET + 1) << 16)
+                            | (read8(radioObjAddr + V1_CONNOBJ_OFFSET + 2) << 8)
+                            | read8(radioObjAddr + V1_CONNOBJ_OFFSET + 3);
+                    if (connObj != 0) {
+                        v1RadioBootstrapped = true;
+                        v1SavedConnObj = connObj;
+                        System.err.printf("[RADIO-V1] Bootstrap complete: radioObj=0x%06X connObj=0x%06X%n",
+                                radioObjAddr, connObj);
+                    } else {
+                        // connObj is NULL — check if pool is ready before injecting
+                        int poolAddr = radioObjAddr + 0x32C8;
+                        int poolHead = (read8(poolAddr) << 24) | (read8(poolAddr+1) << 16)
+                                | (read8(poolAddr+2) << 8) | read8(poolAddr+3);
+                        if (poolHead == 0) {
+                            // Pool not initialized yet — retry later
+                        } else if (!v1BootstrapPending) {
+                            // Pool ready, inject state=9 + 0x03 ACK
+                            sci0Scr = 0x70;
+                            write8(0xFFFF7A, 0x70);
+                            write8(radioObjAddr + V1_STATE_OFFSET, 9);
+                            radio.queueResponse(0x03);
+                            v1BootstrapPending = true;
+                        } else {
+                            // Previous injection didn't result in connObj allocation
+                            v1BootstrapPending = false;
+                        }
+                    }
+                }
+            }
+        }
+        // (Diagnostic state monitoring removed — use SCI0-REG log for debugging)
+        // V1 async frame delivery (like XT's tickSci2 async path):
+        // When CyOS state == 1 (idle), inject frame indicator for pending frames.
+        if (radio != null && radioSciChannel == 0
+                && config.type == MachineConfig.MachineType.V1
+                && v1RadioBootstrapped
+                && !sci0Rdrf && !radio.hasData()
+                && radio.hasPendingFrames()) {
+            asyncRadioCheckCountdown--;
+            if (asyncRadioCheckCountdown <= 0) {
+                asyncRadioCheckCountdown = ASYNC_RADIO_CHECK_INTERVAL;
+                int radioObjAddr = (read8(V1_RADIO_OBJ_PTR_ADDR) << 24)
+                        | (read8(V1_RADIO_OBJ_PTR_ADDR + 1) << 16)
+                        | (read8(V1_RADIO_OBJ_PTR_ADDR + 2) << 8)
+                        | read8(V1_RADIO_OBJ_PTR_ADDR + 3);
+                if (radioObjAddr >= 0x200000 && radioObjAddr < 0x280000) {
+                    int cyState = read8(radioObjAddr + V1_STATE_OFFSET);
+                    if (cyState == 1) {
+                        int indicator = radio.tryAsyncDelivery();
+                        if (indicator >= 0) {
+                            // Also queue the frame data for byte-by-byte delivery
+                            int count = (indicator == 0xC8) ? 200 : 50;
+                            radio.prepareRxFrame(count);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Drive V1 radio poll/scan cycles. Call once per frame from CybikoEmulator.
+     *
+     * CyOS V1 never calls the radio tick function (0x214760) from its scheduler
+     * after init. Without periodic tick calls, the radio never enters state 7
+     * (TX command) and never starts poll/scan cycles. We emulate the tick
+     * function's effect by directly setting up the radio state machine fields:
+     *   - Command byte (obj+0x336E): 0x30 (poll) or 0xCF (scan)
+     *   - Param byte (obj+0x336F): current channel from obj+0x3371
+     *   - TX pointers: txEnd = txPtr (state 2 sends 1 garbage byte then state 9)
+     *   - State = 7 (triggers TXI0 to send command sequence)
+     *   - TIE enabled in SCR (starts TXI0 interrupt chain)
+     *
+     * This lets the TXI0/RXI0 handlers run naturally:
+     *   7→8→2→9 (TX) → v1TxComplete → 0x03 ACK (RXI0 state 9→completion→state 1)
+     *   → indicator (RXI0 state 1→frame handler→state 5) → frame data → state 1
+     */
+    public void tickV1Radio() {
+        if (!v1RadioBootstrapped || radio == null
+                || config.type != MachineConfig.MachineType.V1) return;
+
+        v1PollFrameCounter++;
+        if (v1PollFrameCounter < V1_POLL_INTERVAL) return;
+        v1PollFrameCounter = 0;
+
+        int radioObjAddr = (read8(V1_RADIO_OBJ_PTR_ADDR) << 24)
+                | (read8(V1_RADIO_OBJ_PTR_ADDR + 1) << 16)
+                | (read8(V1_RADIO_OBJ_PTR_ADDR + 2) << 8)
+                | read8(V1_RADIO_OBJ_PTR_ADDR + 3);
+        if (radioObjAddr < 0x200000 || radioObjAddr >= 0x280000) return;
+
+        int state = read8(radioObjAddr + V1_STATE_OFFSET);
+        if (state != 1) return; // Only drive when idle
+
+        // Restore connObj if completion handler NULLed it
+        int connObj = (read8(radioObjAddr + V1_CONNOBJ_OFFSET) << 24)
+                | (read8(radioObjAddr + V1_CONNOBJ_OFFSET + 1) << 16)
+                | (read8(radioObjAddr + V1_CONNOBJ_OFFSET + 2) << 8)
+                | read8(radioObjAddr + V1_CONNOBJ_OFFSET + 3);
+        if (connObj == 0 && v1SavedConnObj != 0) {
+            // Restore saved connObj address
+            write8(radioObjAddr + V1_CONNOBJ_OFFSET, (v1SavedConnObj >> 24) & 0xFF);
+            write8(radioObjAddr + V1_CONNOBJ_OFFSET + 1, (v1SavedConnObj >> 16) & 0xFF);
+            write8(radioObjAddr + V1_CONNOBJ_OFFSET + 2, (v1SavedConnObj >> 8) & 0xFF);
+            write8(radioObjAddr + V1_CONNOBJ_OFFSET + 3, v1SavedConnObj & 0xFF);
+            connObj = v1SavedConnObj;
+        } else if (connObj != 0 && v1SavedConnObj == 0) {
+            v1SavedConnObj = connObj;
+        }
+        if (connObj == 0) return; // No connObj available
+
+        // Reset txPtr to connObj (completion handler clears it to 0)
+        write8(radioObjAddr + 0x3350, (connObj >> 24) & 0xFF);
+        write8(radioObjAddr + 0x3351, (connObj >> 16) & 0xFF);
+        write8(radioObjAddr + 0x3352, (connObj >> 8) & 0xFF);
+        write8(radioObjAddr + 0x3353, connObj & 0xFF);
+
+        // Alternate poll (0x30) and scan (0xCF) with 4:1 ratio
+        int cmd;
+        if (v1PollScanAlternator >= 4) {
+            cmd = 0xCF; // Scan
+            v1PollScanAlternator = 0;
+        } else {
+            cmd = 0x30; // Poll
+            v1PollScanAlternator++;
+        }
+
+        // Read current channel
+        int channel = read8(radioObjAddr + 0x3371);
+
+        // Set up command and param bytes
+        write8(radioObjAddr + 0x336E, cmd);
+        write8(radioObjAddr + 0x336F, channel);
+
+        // Set txEnd = txPtr (= connObj) so state 2 transitions after 1 byte
+        write8(radioObjAddr + 0x3354, (connObj >> 24) & 0xFF);
+        write8(radioObjAddr + 0x3355, (connObj >> 16) & 0xFF);
+        write8(radioObjAddr + 0x3356, (connObj >> 8) & 0xFF);
+        write8(radioObjAddr + 0x3357, connObj & 0xFF);
+
+        // Set state = 7 (TX command byte)
+        write8(radioObjAddr + V1_STATE_OFFSET, 7);
+
+        // Enable TIE in SCR and schedule first TXI0
+        sci0Scr |= 0x80;
+        if (sci0Tdre && sci0TxiDelay == 0) {
+            sci0TxiDelay = SCI0_TXI_DELAY;
+        }
+
+    }
+
+    /**
      * When a byte finishes "transmitting" (delay expires), TDRE goes high.
      * If TIE is set in SCR, fires TXI2 (vector 90).
      * When the radio has response data and RDRF is clear, delivers it to RDR
@@ -489,8 +730,14 @@ public class AddressBus {
         if (address == 0xFFFF2F) return isr;
 
         // SCI SSR registers
+        // SCI0 SCR (0xFFFF7A) — return our cached value so BSET/BCLR work correctly.
+        // Without this, BSET reads stale on-chip RAM (0x00) instead of the real SCR,
+        // causing read-modify-write to clobber TE/RE/RIE bits.
+        if (address == 0xFFFF7A) return sci0Scr;
+        if (address == 0xFFFF8A) return sci2Scr; // SCI2 SCR
+
         if (address == 0xFFFF7C) { // SCI0 SSR
-            int ssr = SSR_TDRE | SSR_TEND;
+            int ssr = (sci0Tdre ? SSR_TDRE : 0) | (sci0Tdre ? SSR_TEND : 0);
             if (radio != null && radioSciChannel == 0 && sci0Rdrf) ssr |= SSR_RDRF;
             if (sci0RegLog.size() < 500) {
                 int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
@@ -712,23 +959,41 @@ public class AddressBus {
                         // consume response. Response delivered asynchronously via RXI2.
                         radio.receive(value & 0xFF);
                     } else {
-                        // SCI0 (V1/V2): synchronous full-duplex
-                        int response = radio.transfer(value & 0xFF);
-                        sci0Rdr = response;
-                        sci0Rdrf = true;
+                        // SCI0 (V1/V2): feed byte to radio. Response delivered via RXI0.
+                        radio.receive(value & 0xFF);
                     }
-                    // SCI2: model TDRE — clear on TDR write, restore after transmission delay.
+                    // Model TDRE — clear on TDR write, restore after transmission delay.
                     // Always schedule TDRE restoration (real HW restores TDRE after byte TX
-                    // regardless of TIE). TIE only controls whether TXI2 interrupt fires.
+                    // regardless of TIE). TIE only controls whether TXI interrupt fires.
                     if (channel == 2) {
                         sci2Tdre = false;
                         sci2TxiDelay = SCI2_TXI_DELAY;
+                    }
+                    if (channel == 0) {
+                        sci0Tdre = false;
+                        sci0TxiDelay = SCI0_TXI_DELAY;
                     }
                 }
                 // V1: SCI1 TDR writes go to SPI flash
                 if (channel == 1 && spiFlash != null) {
                     sci1Rdr = spiFlash.transfer(value & 0xFF);
                     sci1Rdrf = true;
+                }
+            }
+            if (reg == 2 && channel == 0) { // SCI0 SCR write
+                int oldScr = sci0Scr;
+                sci0Scr = value & 0xFF;
+                // If TIE just enabled and TDRE is already set, schedule first TXI0
+                boolean tieEnabled = (sci0Scr & 0x80) != 0;
+                boolean tieWasOff = (oldScr & 0x80) == 0;
+                if (tieEnabled && sci0Tdre && (tieWasOff || sci0TxiDelay == 0)) {
+                    sci0TxiDelay = SCI0_TXI_DELAY;
+                }
+                // V1: TIE 1→0 = TXI0 state 9 disabled TIE after TX complete.
+                // Process accumulated poll/scan data and queue the response.
+                boolean tieCleared = (oldScr & 0x80) != 0 && (sci0Scr & 0x80) == 0;
+                if (tieCleared && radio != null && config.type == MachineConfig.MachineType.V1) {
+                    radio.v1TxComplete();
                 }
             }
             if (reg == 2 && channel == 1 && spiFlash != null) { // SCR write for SCI1
