@@ -67,6 +67,6 @@ jobs:
 
             Requires Java 21+.
           files: |
-            build/distributions/*.zip
+            emulator/build/distributions/*.zip
             manager/build/distributions/*.zip
           generate_release_notes: true

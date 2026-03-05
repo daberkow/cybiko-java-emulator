@@ -30,7 +30,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cybiko-java-dist
-          path: build/distributions/*.zip
+          path: emulator/build/distributions/*.zip
           retention-days: 14
 
       - name: Upload manager artifacts

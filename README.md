@@ -4,6 +4,10 @@ A standalone Java emulator for the Cybiko handheld computer family, plus a deskt
 
 After getting the base emulator working, I went about adding new features like a manager to manage the games, and working on wireless communications.
 
+This is the main repo for me working on this project. A few others have been made for a [C Version](https://github.com/daberkow/cybiko-c-emulator) and a port to the [LilyGo T-Deck](https://github.com/daberkow/cybiko-lilygo). Java is my best known language, thus I started here to be able to debug.
+
+Please report issues to the projects [Issues tab](https://github.com/daberkow/cybiko-java-emulator/issues).
+
 ## Current Functionality
 
 | Feature | Classic V1 | V2 | Xtreme |
@@ -149,3 +153,4 @@ Requires Java 21 (auto-downloaded via Gradle toolchains).
 - [Cybiko ROMs (MAME)](https://ia803204.us.archive.org/view_archive.php?archive=/29/items/mame-0.221-roms-merged/cybikov1.zip)
 - [MAME Code](https://github.com/mamedev/mame/blob/master/src/mame/cybiko/cybiko.cpp)
 - [Tim's Web Emulator](https://www.schuerewegen.tk/cybiko/emu/) - WASM version by the original MAME author
+
