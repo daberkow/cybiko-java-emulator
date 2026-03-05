@@ -1,6 +1,27 @@
 # Cybiko Emulator & NVRAM Manager
 
-A standalone Java emulator for the Cybiko handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by Tim Schuerewegen. Supports the Cybiko Classic (V1), V2, and Xtreme with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code. 99% of this project was created with Claude Code Opus 4.6.
+A standalone Java emulator for the Cybiko handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by Tim Schuerewegen. Supports the Cybiko Classic (V1), V2, and Xtreme with LCD display, keyboard input, sound, and app loading. This project was something I was interested in, and I wanted to test out Claude Code.
+
+After getting the base emulator working, I went about adding new features like a manager to manage the games, and working on wireless communications.
+
+## Current Functionality
+
+| Feature | Classic V1 | V2 | Xtreme |
+|---------|:----------:|:--:|:------:|
+| Core (boot to interactive UI) | Yes | Partial (stalls at logo) | Yes |
+| Sound (1-bit PWM speaker) | Yes | Yes | Yes |
+| MP3 Player | No | No | No |
+| Radio (LAN/SDR networking) | Yes | No (RF init blocked) | Yes (peer discovery + chat) |
+| RTC (real-time clock) | Partial | Partial | Partial |
+| App Loading (CFS + NVRAM) | Yes | Yes | Yes |
+| Keyboard | Yes | Yes | Yes |
+| DMA | N/A | N/A | Yes |
+
+**Notes:**
+- **V2** boots through SPI flash loading and reaches the animated Cybiko logo but never progresses to the desktop. RF hardware init never completes (same limitation as MAME).
+- **MP3** playback is not implemented on any variant. Sound is 1-bit PWM only.
+- **RTC** communicates over I2C on all variants but does not function as an autonomous clock.but is giving the wrong date.
+- **Radio** supports UDP multicast (`--radio lan`) and a TCP bridge to GNU Radio (`--radio sdr`). Chat messaging confirmed working between two Xtreme emulators.
 
 ## Project Structure
 
