@@ -61,6 +61,11 @@ public class CybikoEmulator {
     // If obj->state (at obj+0x14) != expected, task is suspended on wait queue.
     private static final int V1_WAIT_FOR_STATE_ADDR = 0x205018;
     private static final int V1_STATE_OFFSET = 0x14;
+    // Blacklist of V1 service objects that must NOT be auto-resolved.
+    // RF object causes hardware init failure; others cause data corruption.
+    private static final java.util.Set<Integer> V1_BLOCKED_OBJECTS = java.util.Set.of(
+        0x223186  // RF hardware
+    );
     private final boolean v1ServiceStub;
 
     private static final long NANOS_PER_FRAME = 1_000_000_000L / 60;
@@ -308,18 +313,13 @@ public class CybikoEmulator {
                     int expectedState = cpu.getER(1) & 0xFF;
                     int currentState = bus.read8(obj + V1_STATE_OFFSET);
                     if (currentState != expectedState) {
-                        // Only resolve "service ready" waits (want=0x01), not
-                        // shutdown/reset waits (want=0x00) to avoid flip-flop loops.
-                        // Resolve after animation phase (frame 420+) to avoid
-                        // disrupting early boot. RF object stays blocked.
-                        boolean isRf = (obj == 0x223186);
-                        boolean resolve = !isRf && expectedState == 0x01 && frameCounter >= 420;
+                        // Blacklist approach: resolve all services except known-bad.
+                        // Wait until frame 420 (after animation) to avoid killing timer interrupts.
+                        boolean resolve = !V1_BLOCKED_OBJECTS.contains(obj)
+                            && expectedState == 0x01 && frameCounter >= 420;
                         if (resolve) {
                             bus.write8(obj + V1_STATE_OFFSET, expectedState);
                         }
-                        System.err.printf("[V1-SVC] frame=%d obj=0x%06X state=0x%02X want=0x%02X %s%n",
-                            frameCounter, obj, currentState, expectedState,
-                            resolve ? "RESOLVED" : (isRf ? "RF-BLOCKED" : "BLOCKED"));
                     }
                 }
 
@@ -359,7 +359,8 @@ public class CybikoEmulator {
 
             // RAM dump feature: -Dcybiko.ramdump=/path writes external RAM at frame 300
             String ramdumpPath = System.getProperty("cybiko.ramdump");
-            if (ramdumpPath != null && frameCounter == 300) {
+            int ramdumpFrame = 300;
+            if (ramdumpPath != null && frameCounter == ramdumpFrame) {
                 try {
                     Files.write(Path.of(ramdumpPath), externalRam.getRawData());
                     System.err.printf("[RAMDUMP] Wrote %d bytes to %s at frame %d%n",

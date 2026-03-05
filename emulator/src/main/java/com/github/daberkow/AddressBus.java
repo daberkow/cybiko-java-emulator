@@ -611,9 +611,20 @@ public class AddressBus {
         if (address >= 0xFFFF90 && address <= 0xFFFF99) {
             if (address <= 0xFFFF97) {
                 if (config.type != MachineConfig.MachineType.XT) {
-                    // V1/V2: ADC data registers. Return max 10-bit value
-                    // (left-aligned in 16-bit register) = fully charged battery.
-                    return (address % 2 == 0) ? 0xFF : 0xC0;
+                    // V1/V2: ADC data registers (channels 0-3, 10-bit left-aligned).
+                    // CyOS battery check at 0x21DF96 has TWO paths:
+                    //   (1) ch1_avg - ch2_avg > 15  (signed, passes immediately if ch1 > ch2)
+                    //   (2) level > 31  (where level = 2*ch2 - ch1 + offset, offset=-341)
+                    // Battery struct uses exponential smoothing (7/8 old + 1/8 new) starting
+                    // from 0, so averages take ~16 iterations to converge. Path (1) passes
+                    // from the 2nd ADC cycle if ch1 > ch2+15.
+                    // ch1 = 0x0300 (768), ch2 = 0x0100 (256): diff converges to 512>15
+                    // (passes from 1st ADC cycle: avg diff=64>15). Level stays low (31)
+                    // but the diff path is sufficient for CyOS battery check to pass.
+                    int channel = (address - 0xFFFF90) / 2;
+                    int adcValue = (channel == 1) ? 0x0300 : (channel == 2) ? 0x0100 : 0x0100;
+                    // H8S ADC left-aligned format: high byte = value >> 2, low byte = (value & 3) << 6
+                    return (address % 2 == 0) ? (adcValue >> 2) & 0xFF : (adcValue & 3) << 6;
                 }
                 return (address % 2 == 0) ? 0xCC : 0x00;
             }
@@ -881,9 +892,18 @@ public class AddressBus {
         if (address >= 0xFFFF90 && address <= 0xFFFF99) {
             if (address == 0xFFFF98) {
                 if ((value & 0x20) != 0) {
-                    adcsr = (value & 0x7F) | 0x80;
+                    // ADST set: start conversion, immediately complete (set ADF),
+                    // then clear ADST (conversion done). Matches MAME done() behavior.
+                    adcsr = (value & 0x5F) | 0x80; // ADF=1, ADST cleared
+                    // Fire ADC interrupt (vector 28) if ADIE is enabled
+                    if ((value & 0x40) != 0 && cpu != null) {
+                        cpu.requestInterrupt(28);
+                        int pc = cpu.getLastStartPC();
+                        System.err.printf("[ADC] Interrupt fired, ADCSR=0x%02X, PC=0x%06X%n", value, pc);
+                    }
                 } else {
-                    adcsr = value & 0x7F;
+                    // MAME: ADF cleared only if software writes 0 to bit 7
+                    adcsr = (value & 0x7F) | (adcsr & value & 0x80);
                 }
             } else if (address == 0xFFFF99) {
                 adcr = value & 0xFF;
