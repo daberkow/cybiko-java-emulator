@@ -769,7 +769,10 @@ public class AddressBus {
             }
         }
         // V2 keyboard quirk from MAME: force bit 1 when column 0 is selected
-        if (config.type == MachineConfig.MachineType.V2 && (wordOffset & 1) == 0) {
+        // to prevent ghost ESC presses (needed for "lost in labyrinth").
+        // Only apply when ESC is not actually pressed by the user.
+        if (config.type == MachineConfig.MachineType.V2 && (wordOffset & 1) == 0
+                && (keyColumns[0] & 0x02) == 0) {
             data |= 0x0002;
         }
         return data;
