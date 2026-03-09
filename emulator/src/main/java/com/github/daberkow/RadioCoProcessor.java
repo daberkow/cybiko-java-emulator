@@ -62,9 +62,15 @@ public class RadioCoProcessor {
 
     // V1 mode: enables byte-by-byte data accumulation after poll/scan commands.
     // On V1, CyOS sends frame data via TXI0 interrupts (not DTC). Set by AddressBus
-    // when the machine type is V1. When false (XT/V2), data comes via DTC and
+    // when the machine type is V1. When false (XT), data comes via DTC and
     // processCommand2 does not start accumulation.
     private boolean v1Mode = false;
+
+    // V2 mode: immediate response after poll/scan commands. V2 uses SCI0 like V1
+    // but does NOT send frame data after poll/scan. Response (0x03 + indicator + 200
+    // bytes) is queued directly in processCommand2(). Always uses 200-byte frames
+    // because V2 CyOS determines byte count from connObj fields, not indicator.
+    private boolean v2Mode = false;
 
     // V1 data accumulation: after poll/scan 2-byte command, V1 sends frame data
     // byte-by-byte via TXI0 (unlike XT which uses TX DTC). We accumulate these
@@ -158,12 +164,31 @@ public class RadioCoProcessor {
      * @return next response byte, or 0xFF if no data available
      */
     public int read() {
-        return rxQueue.isEmpty() ? 0xFF : rxQueue.poll();
+        if (rxQueue.isEmpty()) return 0xFF;
+        return rxQueue.poll();
     }
 
     /** Enable V1 mode: byte-by-byte data accumulation after poll/scan commands. */
     public void setV1Mode(boolean v1) {
         this.v1Mode = v1;
+    }
+
+    /** Enable V2 mode: immediate response after poll/scan (no data accumulation). */
+    public void setV2Mode(boolean v2) {
+        this.v2Mode = v2;
+    }
+
+    /**
+     * V2 beacon data supplier. Called during poll/scan to get the 42-byte beacon
+     * payload (RF payload without 8-byte header) for transmission. Returns null
+     * if no beacon is available yet. Set by AddressBus after CyID patching.
+     */
+    private java.util.function.Supplier<byte[]> v2BeaconSupplier;
+    private boolean v2BeaconSent = false; // Log first beacon only
+
+    /** Set the V2 beacon data supplier for autonomous beacon transmission. */
+    public void setV2BeaconSupplier(java.util.function.Supplier<byte[]> supplier) {
+        this.v2BeaconSupplier = supplier;
     }
 
     /** Returns true if the co-processor has received an init or channel command. */
@@ -446,9 +471,9 @@ public class RadioCoProcessor {
                 rxQueue.add(0xFF);
             }
         } else {
-            // Null frame: all 0x00 so CyOS rejects at listener/broadcast
-            // check (connObj->0x00 = 0x00000000 ≠ 0xFFFFFFFF broadcast).
-            // CyOS discards and recycles the connection buffer immediately.
+            // Null frame: all 0x00 so CyOS processes at listener/broadcast check.
+            // V2's transient connObj has byte 0 = 0x00000000 which matches this,
+            // but V2 CyOS handles it gracefully and it's needed for peer discovery.
             for (int i = 0; i < count; i++) {
                 rxQueue.add(0x00);
             }
@@ -518,6 +543,7 @@ public class RadioCoProcessor {
      */
     public void v1TxComplete() {
         if (!v1DataAccumulating) return;
+
         v1DataAccumulating = false;
         byte[] data = java.util.Arrays.copyOf(v1DataBuffer, v1DataPos);
 
@@ -537,9 +563,9 @@ public class RadioCoProcessor {
         // Queue 0x03 ACK (RXI0 state 9 expects this → completion handler)
         rxQueue.add(0x03);
 
-        // Wait for received frames (same as completeTxDtc)
+        // Wait for received frames (same as completeTxDtc).
         rxFrameReady = false;
-        if (receivedFrames.isEmpty() && transport != null) {
+        if (receivedFrames.isEmpty() && transport != null && v1DataPos > 0) {
             synchronized (receivedFrames) {
                 if (receivedFrames.isEmpty()) {
                     try { receivedFrames.wait(15); } catch (InterruptedException ignored) {}
@@ -550,11 +576,11 @@ public class RadioCoProcessor {
         // Determine frame indicator
         int indicator;
         if (receivedFrames.isEmpty()) {
-            indicator = 0x32; // Null frame — 50 bytes
+            indicator = 0xC8; // No data
         } else {
             ReceivedFrame next = receivedFrames.peek();
             if (lastCommandType == CMD_POLL && next.data().length > 50) {
-                indicator = 0x32; // Large frame waits for scan mode
+                indicator = 0xC8; // Large frame waits for scan mode
             } else {
                 indicator = (next.data().length > 50) ? 0xC8 : 0x32;
                 rxFrameReady = true;
@@ -562,7 +588,7 @@ public class RadioCoProcessor {
         }
         rxQueue.add(indicator);
 
-        // Queue frame data bytes for byte-by-byte delivery via RXI0 state 5
+        // Queue frame data bytes for byte-by-byte delivery via RXI0
         int count = (indicator == 0xC8) ? 200 : 50;
         prepareRxFrame(count);
 
@@ -571,6 +597,54 @@ public class RadioCoProcessor {
             System.err.printf("[RADIO-V1] TX complete: %d data bytes, indicator=0x%02X, frame ready%n",
                     v1DataPos, indicator);
         }
+    }
+
+    /**
+     * Queue V2 response after TIE is cleared. V2 doesn't send frame data,
+     * so we just queue ACK + indicator + frame data directly.
+     */
+    private void v2QueueResponse() {
+        rxQueue.add(0x03); // ACK
+
+        // Brief wait for UDP frames
+        if (receivedFrames.isEmpty() && transport != null) {
+            synchronized (receivedFrames) {
+                if (receivedFrames.isEmpty()) {
+                    try { receivedFrames.wait(10); } catch (InterruptedException ignored) {}
+                }
+            }
+        }
+
+        // V2 CyOS setup_rx (0x118EEC) uses indicator to select frame handling:
+        //   0x32 → has_frame=1 → connObj[0xD2]=1 → reads 50 bytes (real data)
+        //   0xC8 → has_frame=0 → connObj[0xD2]=0 → reads 200 bytes (null data)
+        // Frame sizes MUST match: 0x32=50 bytes, 0xC8=200 bytes.
+        rxFrameReady = false;
+        int indicator;
+        boolean hasFrame = false;
+        String frameInfo = "empty";
+        if (!receivedFrames.isEmpty()) {
+            ReceivedFrame next = receivedFrames.peek();
+            frameInfo = String.format("%d bytes from 0x%08X", next.data().length, next.senderId());
+            if (lastCommandType == CMD_POLL && next.data().length > 50) {
+                indicator = 0xC8; // Poll suppresses large
+                frameInfo += " (poll-suppressed)";
+            } else {
+                indicator = 0x32; // Has real data (50 bytes)
+                rxFrameReady = true;
+                hasFrame = true;
+            }
+        } else {
+            indicator = 0xC8; // No data (200 bytes)
+        }
+        rxQueue.add(indicator);
+
+        int count = (indicator == 0xC8) ? 200 : 50;
+        prepareRxFrame(count);
+
+        System.err.printf("[RADIO-V2] cmd=%s indicator=0x%02X delivered=%b frames=%s queueRemaining=%d%n",
+                lastCommandType == CMD_POLL ? "POLL" : "SCAN", indicator,
+                hasFrame, frameInfo, receivedFrames.size());
     }
 
     /**
@@ -623,17 +697,40 @@ public class RadioCoProcessor {
      */
     private void processCommand2(int header, int param) {
         if (header == 0x30) {
-            // Poll command — CyOS will follow with TX DTC payload (XT)
-            // or TXI0 byte-by-byte data (V1).
             lastCommandType = CMD_POLL;
-            if (v1Mode) { v1DataAccumulating = true; v1DataPos = 0; }
+            if (v1Mode && !v2Mode) { v1DataAccumulating = true; v1DataPos = 0; }
         } else if (header == 0xCF) {
-            // Scan/beacon command — CyOS will follow with TX DTC payload (XT)
-            // or TXI0 byte-by-byte data (V1).
             lastCommandType = CMD_SCAN;
-            if (v1Mode) { v1DataAccumulating = true; v1DataPos = 0; }
+            if (v1Mode && !v2Mode) { v1DataAccumulating = true; v1DataPos = 0; }
         }
-        // No immediate response queued — response comes from DTC completion path
-        // (XT) or v1TxComplete() when TIE is disabled (V1).
+
+        if (v2Mode) {
+            // V2: transmit beacon autonomously. On real hardware, the AVR
+            // co-processor sends the beacon on poll/scan without frame data
+            // from the CPU — V2 only sends 2-byte commands (30/CF), not frames.
+            if (transport != null && v2BeaconSupplier != null) {
+                byte[] beacon = v2BeaconSupplier.get();
+                if (beacon != null && beacon.length > 0) {
+                    int ch = beacon[0] & 0x3F;
+                    if (!v2BeaconSent) {
+                        v2BeaconSent = true;
+                        StringBuilder sb = new StringBuilder();
+                        for (int i = 0; i < Math.min(beacon.length, 16); i++) {
+                            sb.append(String.format("%02X ", beacon[i] & 0xFF));
+                        }
+                        System.err.printf("[RADIO-V2] First beacon TX: ch=%d, %d bytes: %s%n",
+                                ch, beacon.length, sb.toString().trim());
+                    }
+                    transport.sendPacket(beacon, ch);
+                }
+            }
+            // Queue response immediately. V2 uses polled SCI0 reads (not
+            // interrupt-driven), so having data in rxQueue during TXI states
+            // is fine — CyOS won't read it until after TIE is disabled.
+            v2QueueResponse();
+        }
+        // V1: response comes from v1TxComplete() when TIE is disabled.
+        // V2: response comes from v1TxComplete() when TIE is disabled (v2CommandPending).
+        // XT: response comes from DTC completion path.
     }
 }

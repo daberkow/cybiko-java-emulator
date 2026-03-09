@@ -155,6 +155,18 @@ public class AddressBus {
     private static final int V1_STATE_OFFSET = 0x3370;
     private static final int V1_CONNOBJ_OFFSET = 0x3344;
 
+    // V2 radio object address (CyOS v1357 specific)
+    private static final int V2_RADIO_OBJ_PTR_ADDR = 0x200098;
+    private static final int V2_STATE_OFFSET = 0x335A;
+    private static final int V2_CONNOBJ_OFFSET = 0x3340;
+    // V2 CyID locations: two copies in radioObj (found via RAM dump, value 0x000255C7)
+    // +0x301C = beacon/identity buffer CyID (after broadcast dest at +0x3018)
+    // +0x30F4 = second identity copy (after broadcast dest at +0x30F0)
+    private static final int V2_CYID_OFFSET = 0x301C;
+    private static final int V2_CYID_OFFSET_2 = 0x30F4;
+    private boolean v2CyIdPatched = false;
+    private int v2BootstrapDelay = 0;
+
     // Deferred DTC completion: in real hardware, the DTC transfer takes multiple SPI clock
     // cycles. The completion interrupt fires after the last byte, by which time the CPU has
     // typically re-enabled interrupts. Our synchronous DTC fires during the SCR write (while
@@ -190,8 +202,12 @@ public class AddressBus {
         // XT uses SCI2 for radio, V1/V2 use SCI0
         this.radioSciChannel = (config.type == MachineConfig.MachineType.XT) ? 2 : 0;
         // V1 uses byte-by-byte data accumulation (no DTC for radio)
-        if (config.type == MachineConfig.MachineType.V1) {
+        if (config.type == MachineConfig.MachineType.V1
+                || config.type == MachineConfig.MachineType.V2) {
             radio.setV1Mode(true);
+        }
+        if (config.type == MachineConfig.MachineType.V2) {
+            radio.setV2Mode(true);
         }
     }
 
@@ -284,9 +300,82 @@ public class AddressBus {
                 }
             }
         }
-        // (Diagnostic state monitoring removed — use SCI0-REG log for debugging)
+        // V2 radio: no bootstrap needed. V2 CyOS drives its own poll/scan cycle.
+        // We just need to patch the CyID once radioObj is initialized.
+        // Uses v2BootstrapDelay (separate from V1's v1BootstrapDelay).
+        if (radio != null && radioSciChannel == 0
+                && config.type == MachineConfig.MachineType.V2
+                && !v2CyIdPatched && v1RadioId != 0 && radio.isInitialized()) {
+            v2BootstrapDelay++;
+            if (v2BootstrapDelay >= V1_BOOTSTRAP_RETRY_DELAY) {
+                v2BootstrapDelay = 0;
+                int radioObjAddr = (read8(V2_RADIO_OBJ_PTR_ADDR) << 24)
+                        | (read8(V2_RADIO_OBJ_PTR_ADDR + 1) << 16)
+                        | (read8(V2_RADIO_OBJ_PTR_ADDR + 2) << 8)
+                        | read8(V2_RADIO_OBJ_PTR_ADDR + 3);
+                if (radioObjAddr >= 0x200000 && radioObjAddr < 0x240000) {
+                    // Check if CyID location has been initialized by CyOS (non-zero)
+                    int cyIdAddr = radioObjAddr + V2_CYID_OFFSET;
+                    int currentCyId = (read8(cyIdAddr) << 24) | (read8(cyIdAddr + 1) << 16)
+                            | (read8(cyIdAddr + 2) << 8) | read8(cyIdAddr + 3);
+                    if (currentCyId != 0) {
+                        // Patch both CyID copies to match radio-id
+                        for (int offset : new int[]{V2_CYID_OFFSET, V2_CYID_OFFSET_2}) {
+                            int addr = radioObjAddr + offset;
+                            write8(addr, (v1RadioId >> 24) & 0xFF);
+                            write8(addr + 1, (v1RadioId >> 16) & 0xFF);
+                            write8(addr + 2, (v1RadioId >> 8) & 0xFF);
+                            write8(addr + 3, v1RadioId & 0xFF);
+                        }
+                        v2CyIdPatched = true;
+                        v1RadioBootstrapped = true;
+                        System.err.printf("[RADIO-V2] Patched CyID: 0x%08X -> 0x%08X (radioObj=0x%06X)%n",
+                                currentCyId, v1RadioId, radioObjAddr);
+
+                        // Read the actual beacon template from radioObj + 0x3020 (42 bytes).
+                        // CyOS builds this during radio init. Reading it now (at CyID patch
+                        // time) captures the proper format including capability bytes 20-41
+                        // that differ between V1/V2/XT and are checked by peer CyOS.
+                        final byte[] savedBeacon = new byte[42];
+                        int beaconAddr = radioObjAddr + 0x3020;
+                        for (int i = 0; i < 42; i++) {
+                            savedBeacon[i] = (byte) read8(beaconAddr + i);
+                        }
+                        java.util.Random rng = new java.util.Random();
+
+                        // Log beacon template
+                        StringBuilder beaconHex = new StringBuilder();
+                        for (int i = 0; i < 42; i++) {
+                            beaconHex.append(String.format("%02X ", savedBeacon[i] & 0xFF));
+                        }
+                        // Extract name from bytes 12-19
+                        int nameLen = 0;
+                        while (nameLen < 8 && savedBeacon[12 + nameLen] != 0) nameLen++;
+                        String name = new String(savedBeacon, 12, nameLen, java.nio.charset.StandardCharsets.US_ASCII);
+                        System.err.printf("[RADIO-V2] Beacon template: %s%n", beaconHex.toString().trim());
+                        System.err.printf("[RADIO-V2] Built beacon: name='%s' byte20=0x%02X%n",
+                                name, savedBeacon[20] & 0xFF);
+
+                        // Supplier returns beacon with channel byte and random CRC
+                        radio.setV2BeaconSupplier(() -> {
+                            savedBeacon[0] = (byte) (0xC0 | (radio.getCurrentChannel() & 0x3F));
+                            // Randomize CRC/sequence bytes (4-7) each TX
+                            int r = rng.nextInt();
+                            savedBeacon[4] = (byte) (r >> 24);
+                            savedBeacon[5] = (byte) (r >> 16);
+                            savedBeacon[6] = (byte) (r >> 8);
+                            savedBeacon[7] = (byte) r;
+                            return savedBeacon;
+                        });
+                    }
+                    // else: CyID not yet initialized, will retry next cycle
+                }
+            }
+        }
         // V1 async frame delivery (like XT's tickSci2 async path):
         // When CyOS state == 1 (idle), inject frame indicator for pending frames.
+        // Note: V2 does NOT use async delivery — it causes state corruption crashes.
+        // V2 uses synchronous delivery with a short wait in processCommand2 instead.
         if (radio != null && radioSciChannel == 0
                 && config.type == MachineConfig.MachineType.V1
                 && v1RadioBootstrapped
@@ -295,12 +384,14 @@ public class AddressBus {
             asyncRadioCheckCountdown--;
             if (asyncRadioCheckCountdown <= 0) {
                 asyncRadioCheckCountdown = ASYNC_RADIO_CHECK_INTERVAL;
-                int radioObjAddr = (read8(V1_RADIO_OBJ_PTR_ADDR) << 24)
-                        | (read8(V1_RADIO_OBJ_PTR_ADDR + 1) << 16)
-                        | (read8(V1_RADIO_OBJ_PTR_ADDR + 2) << 8)
-                        | read8(V1_RADIO_OBJ_PTR_ADDR + 3);
+                int ptrAddr = (config.type == MachineConfig.MachineType.V2)
+                        ? V2_RADIO_OBJ_PTR_ADDR : V1_RADIO_OBJ_PTR_ADDR;
+                int stateOff = (config.type == MachineConfig.MachineType.V2)
+                        ? V2_STATE_OFFSET : V1_STATE_OFFSET;
+                int radioObjAddr = (read8(ptrAddr) << 24) | (read8(ptrAddr + 1) << 16)
+                        | (read8(ptrAddr + 2) << 8) | read8(ptrAddr + 3);
                 if (radioObjAddr >= 0x200000 && radioObjAddr < 0x280000) {
-                    int cyState = read8(radioObjAddr + V1_STATE_OFFSET);
+                    int cyState = read8(radioObjAddr + stateOff);
                     if (cyState == 1) {
                         int indicator = radio.tryAsyncDelivery();
                         if (indicator >= 0) {
@@ -1048,6 +1139,18 @@ public class AddressBus {
             if (reg == 2 && channel == 0) { // SCI0 SCR write
                 int oldScr = sci0Scr;
                 sci0Scr = value & 0xFF;
+                // When SCI0 is fully disabled (SCR=0x00), clear RDRF.
+                // V2 init: SCR=0x20 → ACK sets RDRF → SCR=0x00 → SCR=0x70.
+                // Without clearing, RDRF stays stuck and tickSci0 can't deliver.
+                if (sci0Scr == 0x00) {
+                    sci0Rdrf = false;
+                }
+                // If RIE just enabled and RDRF is already set, fire RXI0
+                boolean rieEnabled = (sci0Scr & 0x40) != 0;
+                boolean rieWasOff = (oldScr & 0x40) == 0;
+                if (rieEnabled && rieWasOff && sci0Rdrf && cpu != null) {
+                    cpu.requestInterrupt(81); // RXI0
+                }
                 // If TIE just enabled and TDRE is already set, schedule first TXI0
                 boolean tieEnabled = (sci0Scr & 0x80) != 0;
                 boolean tieWasOff = (oldScr & 0x80) == 0;
@@ -1060,7 +1163,9 @@ public class AddressBus {
                 // V1: TIE 1→0 = TXI0 state 9 disabled TIE after TX complete.
                 // Process accumulated poll/scan data and queue the response.
                 boolean tieCleared = (oldScr & 0x80) != 0 && (sci0Scr & 0x80) == 0;
-                if (tieCleared && radio != null && config.type == MachineConfig.MachineType.V1) {
+                if (tieCleared && radio != null
+                        && (config.type == MachineConfig.MachineType.V1
+                         || config.type == MachineConfig.MachineType.V2)) {
                     if (!v1DriverInitiatedTx) {
                         System.err.printf("[RADIO-V1] CyOS-initiated TX complete (not from tickV1Radio)%n");
                     }
