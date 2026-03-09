@@ -337,40 +337,41 @@ public class AddressBus {
                         System.err.printf("[RADIO-V2] Patched CyID: 0x%08X -> 0x%08X (radioObj=0x%06X)%n",
                                 currentCyId, v1RadioId, radioObjAddr);
 
-                        // Read the actual beacon template from radioObj + 0x3020 (42 bytes).
-                        // CyOS builds this during radio init. Reading it now (at CyID patch
-                        // time) captures the proper format including capability bytes 20-41
-                        // that differ between V1/V2/XT and are checked by peer CyOS.
-                        final byte[] savedBeacon = new byte[42];
+                        // Log initial beacon template
+                        StringBuilder beaconHex = new StringBuilder();
                         int beaconAddr = radioObjAddr + 0x3020;
                         for (int i = 0; i < 42; i++) {
-                            savedBeacon[i] = (byte) read8(beaconAddr + i);
-                        }
-                        java.util.Random rng = new java.util.Random();
-
-                        // Log beacon template
-                        StringBuilder beaconHex = new StringBuilder();
-                        for (int i = 0; i < 42; i++) {
-                            beaconHex.append(String.format("%02X ", savedBeacon[i] & 0xFF));
+                            beaconHex.append(String.format("%02X ", read8(beaconAddr + i)));
                         }
                         // Extract name from bytes 12-19
+                        byte[] nameBytes = new byte[8];
+                        for (int j = 0; j < 8; j++) nameBytes[j] = (byte) read8(beaconAddr + 12 + j);
                         int nameLen = 0;
-                        while (nameLen < 8 && savedBeacon[12 + nameLen] != 0) nameLen++;
-                        String name = new String(savedBeacon, 12, nameLen, java.nio.charset.StandardCharsets.US_ASCII);
+                        while (nameLen < 8 && nameBytes[nameLen] != 0) nameLen++;
+                        String name = new String(nameBytes, 0, nameLen, java.nio.charset.StandardCharsets.US_ASCII);
                         System.err.printf("[RADIO-V2] Beacon template: %s%n", beaconHex.toString().trim());
                         System.err.printf("[RADIO-V2] Built beacon: name='%s' byte20=0x%02X%n",
-                                name, savedBeacon[20] & 0xFF);
+                                name, read8(beaconAddr + 20));
 
-                        // Supplier returns beacon with channel byte and random CRC
+                        // Supplier reads beacon buffer LIVE from RAM on every call.
+                        // V2 CyOS writes outgoing data (beacons, chat, etc.) to
+                        // radioObj+0x3020 and the AVR reads it each poll/scan.
+                        // A static snapshot would miss chat messages.
+                        final int liveBeaconAddr = beaconAddr;
+                        java.util.Random rng = new java.util.Random();
                         radio.setV2BeaconSupplier(() -> {
-                            savedBeacon[0] = (byte) (0xC0 | (radio.getCurrentChannel() & 0x3F));
+                            byte[] beacon = new byte[42];
+                            for (int i = 0; i < 42; i++) {
+                                beacon[i] = (byte) read8(liveBeaconAddr + i);
+                            }
+                            beacon[0] = (byte) (0xC0 | (radio.getCurrentChannel() & 0x3F));
                             // Randomize CRC/sequence bytes (4-7) each TX
                             int r = rng.nextInt();
-                            savedBeacon[4] = (byte) (r >> 24);
-                            savedBeacon[5] = (byte) (r >> 16);
-                            savedBeacon[6] = (byte) (r >> 8);
-                            savedBeacon[7] = (byte) r;
-                            return savedBeacon;
+                            beacon[4] = (byte) (r >> 24);
+                            beacon[5] = (byte) (r >> 16);
+                            beacon[6] = (byte) (r >> 8);
+                            beacon[7] = (byte) r;
+                            return beacon;
                         });
                     }
                     // else: CyID not yet initialized, will retry next cycle

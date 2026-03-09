@@ -20,6 +20,13 @@ dependencies {
 application {
     // Define the main class for the application.
     mainClass = 'com.github.daberkow.CybikoEmulator'
+    applicationName = 'cybiko-emulator'
+}
+
+distributions {
+    main {
+        distributionBaseName = 'cybiko-emulator'
+    }
 }
 
 tasks.named('test') {

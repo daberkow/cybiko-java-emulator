@@ -20,6 +20,13 @@ dependencies {
 
 application {
     mainClass = 'com.github.daberkow.cybiko.manager.App'
+    applicationName = 'cybiko-nvram-manager'
+}
+
+distributions {
+    main {
+        distributionBaseName = 'cybiko-nvram-manager'
+    }
 }
 
 tasks.named('test') {

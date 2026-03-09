@@ -610,10 +610,12 @@ public class RadioCoProcessor {
         // Blocking here stalls the entire CPU, causing UI freezes. V2 relies on
         // frames already in receivedFrames (delivered by UDP listener thread).
 
-        // V2 CyOS setup_rx (0x118EEC) uses indicator to select frame handling:
-        //   0x32 → has_frame=1 → connObj[0xD2]=1 → reads 50 bytes (real data)
-        //   0xC8 → has_frame=0 → connObj[0xD2]=0 → reads 200 bytes (null data)
-        // Frame sizes MUST match: 0x32=50 bytes, 0xC8=200 bytes.
+        // V2 CyOS state 1 handler (0x11898E) checks indicator:
+        //   0x32 → R1L=1 → setup_rx with has_frame=1 → reads 50 bytes, processes
+        //   0xC8 → R1L=0 → setup_rx with has_frame=0 → reads 200 bytes, DISCARDS
+        // So V2 MUST always use 0x32 for real data. Large frames (>42 payload) are
+        // truncated to 42 bytes — chat messages fit because the actual content is
+        // short (name + message text), rest is zero padding.
         rxFrameReady = false;
         int indicator;
         boolean hasFrame = false;
@@ -621,17 +623,16 @@ public class RadioCoProcessor {
         if (!receivedFrames.isEmpty()) {
             ReceivedFrame next = receivedFrames.peek();
             frameInfo = String.format("%d bytes from 0x%08X", next.data().length, next.senderId());
-            // V2 does NOT poll-suppress large frames. Unlike XT, V2 doesn't switch
-            // to SCAN (0xCF) during chat — it stays on POLL (0x30). If we suppress
-            // large frames during polls, chat messages from XT never get delivered.
             rxFrameReady = true;
             hasFrame = true;
-            indicator = (next.data().length > 50) ? 0xC8 : 0x32;
+            indicator = 0x32; // Always 0x32 for V2 — 0xC8 means "discard"
         } else {
-            indicator = 0xC8; // No data (200 bytes)
+            indicator = 0xC8; // No data
         }
         rxQueue.add(indicator);
 
+        // V2 always reads 50 bytes for real data (0x32 indicator).
+        // prepareRxFrame(50) delivers 8-byte AVR header + up to 42 bytes of payload.
         int count = (indicator == 0xC8) ? 200 : 50;
         prepareRxFrame(count);
 
