@@ -43,7 +43,7 @@ public class RemoteDisplayServer implements FrameBufferRenderer {
     public void start() throws IOException {
         serverSocket = new ServerSocket(port);
         running = true;
-        System.err.printf("[REMOTE] Listening on port %d%n", port);
+        Log.log(Log.Category.BOOT, "[REMOTE] Listening on port %d", port);
 
         acceptThread = new Thread(this::acceptLoop, "remote-accept");
         acceptThread.setDaemon(true);
@@ -59,7 +59,7 @@ public class RemoteDisplayServer implements FrameBufferRenderer {
                 clientOut = new BufferedOutputStream(socket.getOutputStream(), 8192);
                 clientIn = socket.getInputStream();
                 socket.setTcpNoDelay(true);
-                System.err.printf("[REMOTE] Client connected: %s%n",
+                Log.log(Log.Category.BOOT, "[REMOTE] Client connected: %s",
                     socket.getRemoteSocketAddress());
 
                 readThread = new Thread(this::readLoop, "remote-read");

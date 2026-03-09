@@ -134,7 +134,7 @@ public class CybikoEmulator {
     public void loadBootRom(Path path) throws IOException {
         byte[] data = Files.readAllBytes(path);
         bootRom.load(data, 0);
-        System.out.printf("Loaded boot ROM: %s (%d bytes)%n", path, data.length);
+        Log.log(Log.Category.BOOT, "Loaded boot ROM: %s (%d bytes)", path, data.length);
     }
 
     public void loadFlashRom(Path path) throws IOException {
@@ -142,12 +142,12 @@ public class CybikoEmulator {
         if (config.flashRomSize > 0 && flashRom != null) {
             // V2/XT: load into memory-mapped flash
             flashRom.load(data, 0);
-            System.out.printf("Loaded flash ROM: %s (%d bytes)%n", path, data.length);
+            Log.log(Log.Category.BOOT, "Loaded flash ROM: %s (%d bytes)", path, data.length);
         } else if (config.hasSpiFlash) {
             // V1: no memory-mapped flash, load into SPI flash instead
             spiFlash = new AT45DB041Flash(data);
             bus.setSpiFlash(spiFlash);
-            System.out.printf("Loaded SPI flash: %s (%d bytes)%n", path, data.length);
+            Log.log(Log.Category.BOOT, "Loaded SPI flash: %s (%d bytes)", path, data.length);
         }
     }
 
@@ -171,7 +171,7 @@ public class CybikoEmulator {
         int cyIdOffset = 0x7F818;
         // V2 flash is only 256KB — config block is at XT offset (512KB), skip
         if (cyIdOffset + 3 >= flashRom.getRawData().length) {
-            System.err.printf("[RADIO] Flash too small for CyID patch (size=%d, need=%d), skipping%n",
+            Log.log(Log.Category.RADIO, "[RADIO] Flash too small for CyID patch (size=%d, need=%d), skipping",
                     flashRom.getRawData().length, cyIdOffset + 4);
             return;
         }
@@ -189,14 +189,14 @@ public class CybikoEmulator {
         raw[blockOffset + 2045] = (byte) (checksum >> 16);
         raw[blockOffset + 2046] = (byte) (checksum >> 8);
         raw[blockOffset + 2047] = (byte) checksum;
-        System.out.printf("Patched CyID: 0x%08X (checksum: 0x%08X)%n", cyId, checksum);
+        Log.log(Log.Category.BOOT, "Patched CyID: 0x%08X (checksum: 0x%08X)", cyId, checksum);
     }
 
     public void loadSpiFlash(Path path) throws IOException {
         byte[] data = Files.readAllBytes(path);
         spiFlash = new AT45DB041Flash(data);
         bus.setSpiFlash(spiFlash);
-        System.out.printf("Loaded SPI dataflash: %s (%d bytes)%n", path, data.length);
+        Log.log(Log.Category.BOOT, "Loaded SPI dataflash: %s (%d bytes)", path, data.length);
     }
 
     public void setRenderer(FrameBufferRenderer renderer) {
@@ -229,10 +229,10 @@ public class CybikoEmulator {
         if (running) return;
         cpu.reset();
 
-        System.out.println("=== Initial state (" + config.name + ") ===");
+        Log.log(Log.Category.BOOT, "=== Initial state (" + config.name + ") ===");
         cpu.dumpRegisters();
-        System.out.printf("Reset vector: 0x%08X%n", bus.read32(0x000000));
-        System.out.println();
+        Log.log(Log.Category.BOOT, "Reset vector: 0x%08X", bus.read32(0x000000));
+        Log.log(Log.Category.BOOT, "");
 
         running = true;
         emulatorThread = new Thread(this::run, "emulator");
@@ -248,7 +248,7 @@ public class CybikoEmulator {
         int cyclesPerFrame = config.cyclesPerFrame;
         int numTimer16 = timer16.length;
 
-        System.err.println("=== Starting execution ===");
+        Log.log(Log.Category.BOOT, "=== Starting execution ===");
         long frameDeadline = System.nanoTime() + NANOS_PER_FRAME;
         long frameTotalNanos = 0;
         int frameTimingSamples = 0;
@@ -322,7 +322,7 @@ public class CybikoEmulator {
                     if (rfState != 0x01) {
                         bus.write8(V1_RF_OBJECT + V1_STATE_OFFSET, 0x01);
                         v1RfResolved = true;
-                        System.err.printf("[V1-RADIO] Resolved RF service 0x%06X at frame %d%n",
+                        Log.log(Log.Category.RADIO, "[V1-RADIO] Resolved RF service 0x%06X at frame %d",
                                 V1_RF_OBJECT, frameCounter);
                     }
                 }
@@ -359,7 +359,7 @@ public class CybikoEmulator {
             for (int sci = 0; sci < 3; sci++) {
                 String s = bus.drainSerialOutput(sci);
                 if (!s.isEmpty()) {
-                    System.err.printf("[SCI%d] %s%n", sci, s);
+                    Log.log(Log.Category.BOOT, "[SCI%d] %s", sci, s);
                 }
             }
 
@@ -372,10 +372,10 @@ public class CybikoEmulator {
             if (ramdumpPath != null && frameCounter == ramdumpFrame) {
                 try {
                     Files.write(Path.of(ramdumpPath), externalRam.getRawData());
-                    System.err.printf("[RAMDUMP] Wrote %d bytes to %s at frame %d%n",
+                    Log.log(Log.Category.BOOT, "[RAMDUMP] Wrote %d bytes to %s at frame %d",
                         externalRam.getRawData().length, ramdumpPath, frameCounter);
                 } catch (IOException e) {
-                    System.err.printf("[RAMDUMP] Failed: %s%n", e.getMessage());
+                    Log.log(Log.Category.BOOT, "[RAMDUMP] Failed: %s", e.getMessage());
                 }
             }
 
@@ -395,7 +395,7 @@ public class CybikoEmulator {
                 long vramHash = crc.getValue();
                 double avgFrameMs = (frameTimingSamples > 0) ? (frameTotalNanos / (double) frameTimingSamples) / 1_000_000.0 : 0;
                 double usagePct = (avgFrameMs / 16.67) * 100;
-                System.err.printf("[STATUS] frame=%d steps=%d PC=0x%06X halted=%b vram=%08X frame=%.1fms(%.0f%%) t8_0[tcr=%02X irqs=%d] t8_1[tcr=%02X irqs=%d]%n",
+                Log.log(Log.Category.STATUS, "[STATUS] frame=%d steps=%d PC=0x%06X halted=%b vram=%08X frame=%.1fms(%.0f%%) t8_0[tcr=%02X irqs=%d] t8_1[tcr=%02X irqs=%d]",
                     frameCounter, totalSteps, cpu.getPC(), cpu.isHalted(), vramHash,
                     avgFrameMs, usagePct,
                     timer8_0.getTcr(), timer8_0.getInterruptCount(),
@@ -403,24 +403,32 @@ public class CybikoEmulator {
                 frameTotalNanos = 0;
                 frameTimingSamples = 0;
 
-                if (!bus.getSci0TdrLog().isEmpty()) {
+                if (!bus.getSci0TdrLog().isEmpty() && Log.isEnabled(Log.Category.RADIO)) {
                     StringBuilder hex = new StringBuilder("[SCI0-TX] ");
                     for (int b : bus.getSci0TdrLog()) hex.append(String.format("%02X ", b));
-                    System.err.println(hex);
+                    Log.log(Log.Category.RADIO, hex.toString());
+                    bus.getSci0TdrLog().clear();
+                } else {
                     bus.getSci0TdrLog().clear();
                 }
-                if (!bus.getSci0RegLog().isEmpty()) {
-                    System.err.println("[SCI0-REG] " + String.join(" | ", bus.getSci0RegLog()));
+                if (!bus.getSci0RegLog().isEmpty() && Log.isEnabled(Log.Category.RADIO)) {
+                    Log.log(Log.Category.RADIO, "[SCI0-REG] " + String.join(" | ", bus.getSci0RegLog()));
+                    bus.getSci0RegLog().clear();
+                } else {
                     bus.getSci0RegLog().clear();
                 }
-                if (!bus.getSci2TdrLog().isEmpty()) {
+                if (!bus.getSci2TdrLog().isEmpty() && Log.isEnabled(Log.Category.RADIO)) {
                     StringBuilder hex = new StringBuilder("[SCI2-TX] ");
                     for (int b : bus.getSci2TdrLog()) hex.append(String.format("%02X ", b));
-                    System.err.println(hex);
+                    Log.log(Log.Category.RADIO, hex.toString());
+                    bus.getSci2TdrLog().clear();
+                } else {
                     bus.getSci2TdrLog().clear();
                 }
-                if (!bus.getSci2RegLog().isEmpty()) {
-                    System.err.println("[SCI2-REG] " + String.join(" | ", bus.getSci2RegLog()));
+                if (!bus.getSci2RegLog().isEmpty() && Log.isEnabled(Log.Category.RADIO)) {
+                    Log.log(Log.Category.RADIO, "[SCI2-REG] " + String.join(" | ", bus.getSci2RegLog()));
+                    bus.getSci2RegLog().clear();
+                } else {
                     bus.getSci2RegLog().clear();
                 }
             }
@@ -461,7 +469,7 @@ public class CybikoEmulator {
         try {
             byte[] data = externalRam.getRawData();
             Files.write(nvramPath, data);
-            System.out.printf("Saved NVRAM: %s (%d bytes)%n", nvramPath, data.length);
+            Log.log(Log.Category.BOOT, "Saved NVRAM: %s (%d bytes)", nvramPath, data.length);
         } catch (IOException e) {
             System.err.println("Error saving NVRAM: " + e.getMessage());
         }
@@ -492,6 +500,7 @@ public class CybikoEmulator {
             System.out.println("  --radio-id <n>     - Set radio device ID (default: random)");
             System.out.println("  --sdr-host <ip>    - SDR bridge host (default: localhost)");
             System.out.println("  --sdr-port <port>  - SDR bridge port (default: 19201)");
+            System.out.println("  --logging <cats>   - Log categories: all,none,status,cpu,radio,rtc,dma,io,boot,cfs,speaker");
             System.exit(1);
         }
 
@@ -504,6 +513,7 @@ public class CybikoEmulator {
         int radioDeviceId = 0;
         String sdrHost = "localhost";
         int sdrPort = 19201;
+        String loggingSpec = null;
         MachineConfig.MachineType machineType = MachineConfig.MachineType.XT;
 
         // Parse arguments
@@ -542,6 +552,7 @@ public class CybikoEmulator {
                 case "--radio-id" -> { if (i + 1 < args.length) radioDeviceId = Integer.parseInt(args[++i]); }
                 case "--sdr-host" -> { if (i + 1 < args.length) sdrHost = args[++i]; }
                 case "--sdr-port" -> { if (i + 1 < args.length) sdrPort = Integer.parseInt(args[++i]); }
+                case "--logging" -> { if (i + 1 < args.length) loggingSpec = args[++i]; }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
@@ -549,6 +560,8 @@ public class CybikoEmulator {
                 }
             }
         }
+
+        Log.setEnabled(Log.Category.parse(loggingSpec));
 
         MachineConfig config = MachineConfig.forType(machineType);
         CybikoEmulator emu = new CybikoEmulator(config);
@@ -572,7 +585,7 @@ public class CybikoEmulator {
                     byte[] nvData = Files.readAllBytes(nvPath);
                     if (CfsImage.isCfsImage(nvData)) {
                         cfs = new CfsImage(nvData);
-                        System.out.printf("Loaded NVRAM: %s (%d bytes, CFS image)%n",
+                        Log.log(Log.Category.BOOT, "Loaded NVRAM: %s (%d bytes, CFS image)",
                             nvramFile, nvData.length);
                     } else {
                         System.err.printf("Warning: %s is not a CFS image, creating fresh%n", nvramFile);
@@ -580,7 +593,7 @@ public class CybikoEmulator {
                     }
                 } else {
                     cfs = new CfsImage();
-                    System.out.printf("Created new NVRAM: %s%n", nvramFile);
+                    Log.log(Log.Category.BOOT, "Created new NVRAM: %s", nvramFile);
                 }
 
                 for (String appPath : appPaths) {
@@ -589,7 +602,7 @@ public class CybikoEmulator {
                     String appName = ap.getFileName().toString();
                     if (CfsImage.isCfsImage(appData)) {
                         cfs = new CfsImage(appData);
-                        System.out.printf("Loaded CFS image: %s%n", appPath);
+                        Log.log(Log.Category.BOOT, "Loaded CFS image: %s", appPath);
                     } else {
                         cfs.addFile(appName, appData);
                     }
@@ -702,7 +715,7 @@ public class CybikoEmulator {
                             byte[] nvData = Files.readAllBytes(path);
                             emu.getExternalRam().load(nvData, 0);
                             emu.setNvramPath(path);
-                            System.out.printf("Loaded NVRAM: %s (%d bytes)%n", path, nvData.length);
+                            Log.log(Log.Category.BOOT, "Loaded NVRAM: %s (%d bytes)", path, nvData.length);
                         } catch (IOException ex) {
                             JOptionPane.showMessageDialog(swing.getFrame(),
                                 "Error loading NVRAM: " + ex.getMessage(),
@@ -720,7 +733,7 @@ public class CybikoEmulator {
                             Path path = fc.getSelectedFile().toPath();
                             Files.write(path, emu.getExternalRam().getRawData());
                             emu.setNvramPath(path);
-                            System.out.printf("Saved NVRAM: %s%n", path);
+                            Log.log(Log.Category.BOOT, "Saved NVRAM: %s", path);
                         } catch (IOException ex) {
                             JOptionPane.showMessageDialog(swing.getFrame(),
                                 "Error saving NVRAM: " + ex.getMessage(),

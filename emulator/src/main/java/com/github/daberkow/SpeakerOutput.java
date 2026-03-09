@@ -37,16 +37,16 @@ public class SpeakerOutput {
             AudioFormat format = new AudioFormat(SAMPLE_RATE, 8, 1, false, false);
             DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
             if (!AudioSystem.isLineSupported(info)) {
-                System.err.println("[SPEAKER] Audio line not supported");
+                Log.log(Log.Category.SPEAKER, "[SPEAKER] Audio line not supported");
                 return;
             }
             line = (SourceDataLine) AudioSystem.getLine(info);
             line.open(format, BUFFER_SIZE * 4);
             line.start();
             open = true;
-            System.err.println("[SPEAKER] Audio output opened: " + SAMPLE_RATE + " Hz, 8-bit mono");
+            Log.log(Log.Category.SPEAKER, "[SPEAKER] Audio output opened: " + SAMPLE_RATE + " Hz, 8-bit mono");
         } catch (LineUnavailableException e) {
-            System.err.println("[SPEAKER] Could not open audio: " + e.getMessage());
+            Log.log(Log.Category.SPEAKER, "[SPEAKER] Could not open audio: " + e.getMessage());
         }
     }
 

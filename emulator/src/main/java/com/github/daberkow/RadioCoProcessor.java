@@ -232,15 +232,17 @@ public class RadioCoProcessor {
      * @param senderId device ID of the sender (used for AVR header bytes 4-7)
      */
     public void queueReceivedFrame(byte[] data, int senderId) {
-        StringBuilder hex = new StringBuilder();
-        StringBuilder ascii = new StringBuilder();
-        for (int i = 0; i < Math.min(data.length, 52); i++) {
-            int b = data[i] & 0xFF;
-            hex.append(String.format("%02X ", b));
-            ascii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
+        if (Log.isEnabled(Log.Category.RADIO)) {
+            StringBuilder hex = new StringBuilder();
+            StringBuilder ascii = new StringBuilder();
+            for (int i = 0; i < Math.min(data.length, 52); i++) {
+                int b = data[i] & 0xFF;
+                hex.append(String.format("%02X ", b));
+                ascii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
+            }
+            Log.log(Log.Category.RADIO, "[RADIO] queueReceivedFrame %d bytes from 0x%08X: %s |%s|",
+                    data.length, senderId, hex.toString().trim(), ascii);
         }
-        System.err.printf("[RADIO] queueReceivedFrame %d bytes from 0x%08X: %s |%s|%n",
-                data.length, senderId, hex.toString().trim(), ascii);
         // Cap queue at 4 frames to prevent unbounded growth while allowing
         // retransmit bursts (CyOS sends each frame 3x). Previous cap of 2
         // caused frames to be flushed before the next TX DTC cycle could
@@ -282,7 +284,7 @@ public class RadioCoProcessor {
             // no RF header and produce 0-byte payloads after stripping.
             if (data.length <= RF_HEADER_SIZE + 1) {
                 if (v1Mode && data.length > 0) {
-                    System.err.printf("[RADIO-V1] handleTransmit: DROPPED %d-byte frame (too short for RF header strip)%n", data.length);
+                    Log.log(Log.Category.RADIO, "[RADIO-V1] handleTransmit: DROPPED %d-byte frame (too short for RF header strip)", data.length);
                 }
                 return;
             }
@@ -302,12 +304,12 @@ public class RadioCoProcessor {
             // own channel byte ensures the UDP transport channel matches
             // what CyOS wrote into the frame content.
             int frameChannel = payload[0] & 0x3F;
-            if (v1Mode) {
+            if (v1Mode && Log.isEnabled(Log.Category.RADIO)) {
                 StringBuilder sb = new StringBuilder();
                 for (int i = 0; i < Math.min(data.length, 20); i++) {
                     sb.append(String.format("%02X ", data[i] & 0xFF));
                 }
-                System.err.printf("[RADIO-V1] handleTransmit: SENT %d raw → %d payload, ch=%d: %s%n",
+                Log.log(Log.Category.RADIO, "[RADIO-V1] handleTransmit: SENT %d raw → %d payload, ch=%d: %s",
                         data.length, payload.length, frameChannel, sb.toString().trim());
             }
             transport.sendPacket(payload, frameChannel);
@@ -526,7 +528,7 @@ public class RadioCoProcessor {
 
         asyncRxPending = true;
         rxQueue.add(indicator);
-        System.err.printf("[RADIO-ASYNC] Injecting indicator 0x%02X for %d-byte frame from 0x%08X%n",
+        Log.log(Log.Category.RADIO, "[RADIO-ASYNC] Injecting indicator 0x%02X for %d-byte frame from 0x%08X",
                 indicator, next.data().length, next.senderId());
         return indicator;
     }
@@ -548,12 +550,12 @@ public class RadioCoProcessor {
         byte[] data = java.util.Arrays.copyOf(v1DataBuffer, v1DataPos);
 
         // Log ALL TX data (not just when frames are ready)
-        if (v1DataPos > 0) {
+        if (v1DataPos > 0 && Log.isEnabled(Log.Category.RADIO)) {
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < Math.min(v1DataPos, 30); i++) {
                 sb.append(String.format("%02X ", data[i] & 0xFF));
             }
-            System.err.printf("[RADIO-V1] v1TxComplete: %d bytes, cmd=%s: %s%n",
+            Log.log(Log.Category.RADIO, "[RADIO-V1] v1TxComplete: %d bytes, cmd=%s: %s",
                     v1DataPos, lastCommandType == CMD_POLL ? "POLL" : "SCAN",
                     sb.toString().trim());
         }
@@ -594,7 +596,7 @@ public class RadioCoProcessor {
 
         // Log only when there's actual data (not the periodic null polls)
         if (rxFrameReady) {
-            System.err.printf("[RADIO-V1] TX complete: %d data bytes, indicator=0x%02X, frame ready%n",
+            Log.log(Log.Category.RADIO, "[RADIO-V1] TX complete: %d data bytes, indicator=0x%02X, frame ready",
                     v1DataPos, indicator);
         }
     }
@@ -636,7 +638,7 @@ public class RadioCoProcessor {
         int count = (indicator == 0xC8) ? 200 : 50;
         prepareRxFrame(count);
 
-        System.err.printf("[RADIO-V2] cmd=%s indicator=0x%02X delivered=%b frames=%s queueRemaining=%d%n",
+        Log.log(Log.Category.RADIO, "[RADIO-V2] cmd=%s indicator=0x%02X delivered=%b frames=%s queueRemaining=%d",
                 lastCommandType == CMD_POLL ? "POLL" : "SCAN", indicator,
                 hasFrame, frameInfo, receivedFrames.size());
     }
@@ -708,12 +710,14 @@ public class RadioCoProcessor {
                     int ch = beacon[0] & 0x3F;
                     if (!v2BeaconSent) {
                         v2BeaconSent = true;
-                        StringBuilder sb = new StringBuilder();
-                        for (int i = 0; i < Math.min(beacon.length, 16); i++) {
-                            sb.append(String.format("%02X ", beacon[i] & 0xFF));
+                        if (Log.isEnabled(Log.Category.RADIO)) {
+                            StringBuilder sb = new StringBuilder();
+                            for (int i = 0; i < Math.min(beacon.length, 16); i++) {
+                                sb.append(String.format("%02X ", beacon[i] & 0xFF));
+                            }
+                            Log.log(Log.Category.RADIO, "[RADIO-V2] First beacon TX: ch=%d, %d bytes: %s",
+                                    ch, beacon.length, sb.toString().trim());
                         }
-                        System.err.printf("[RADIO-V2] First beacon TX: ch=%d, %d bytes: %s%n",
-                                ch, beacon.length, sb.toString().trim());
                     }
                     transport.sendPacket(beacon, ch);
                 }

@@ -20,6 +20,7 @@ Learning project intended for eventual port to C.
 | `--machine v1\|v2\|xt` | Select machine type (default: `xt`) |
 | `--headless` | Run without GUI window |
 | `--trace` | Enable instruction tracing (slow, verbose) |
+| `--logging <cats>` | Log categories: cpu,radio,rtc,dma,io,status,boot,cfs,speaker,all,none (default: boot,status) |
 | `--mute` | Disable audio output |
 | `--nvram <file>` | Load/save persistent NVRAM (CFS filesystem + CyOS state) |
 | `--app <file.app>` | Add .app file to NVRAM before booting (multiple allowed) |
@@ -374,6 +375,10 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   Returning uniform max values (0xFFC0) fails because diff=0. Need ch1 > ch2+15 (bug #14)
 - **V1 service stub harmful**: Unlike V2, V1 CyOS boots without a service stub. Adding one
   causes battery dialog timer waits to complete instantly, freezing the UI (bug #15)
+- **MULXU.B register addressing**: MULXU.B Rs, Rd multiplies byte Rs × low byte of WORD
+  register Rd. The Rd operand is a 4-bit word register index, not a byte register index.
+  Must use `getR(rd) & 0xFF` (low byte of word reg), not `getRegB(rd)` (which maps 0→R0H
+  instead of R0L). Caused BCD-to-binary conversion to lose tens digit (bug #16)
 
 ## Known Issues
 - **Fn+number keys intermittent**: Number keys (Fn+letter combos) work ~80-90% of the
@@ -431,7 +436,8 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - V1 CyOS fully boots from SPI flash (AT45DB041 + DTC bulk transfer) to interactive UI
 - Keyboard input works (letters, navigation keys, Fn+letter for numbers on XT, dedicated numbers on V1)
 - Minimum key hold time (3 frames) prevents fast key presses from being missed
-- RTC I2C protocol works on all variants (V1/V2 use DDR-based SDA, XT uses DR-based SDA)
+- RTC shows correct date/time on all variants (PCF8593 I2C, real-time advancement)
+- Selectable log categories via --logging flag (cpu,radio,rtc,dma,io,status,boot,cfs,speaker)
 - LCD renders full CyOS UI with menus and text input
 - Timer8 and Timer16 interrupts drive the OS scheduler
 - DMA controller handles keyboard matrix scans (XT only; V1/V2 use direct reads)
@@ -611,11 +617,10 @@ Real-time clock connected via I2C bit-bang on Port F.
 | 7   | Timer / **Year counter** (CyOS-specific) | BCD, see below |
 | 8-15 | Alarm registers       | CyOS writes defaults on boot |
 
-### CyOS Clock Protocol (EXPERIMENTAL - not yet working in emulator)
-From ROM disassembly at 0x4A46A4-0x4A47F0. This documents how CyOS expects the
-RTC to behave. Currently the I2C reads don't return correct values because the
-d75fd54-style DR-based triggering doesn't properly handle all I2C sequences.
-Fixing this requires getting the DDR-based SDA approach working (see bug #10).
+### CyOS Clock Protocol
+From ROM disassembly at 0x4A46A4-0x4A47F0. This documents how CyOS uses the RTC.
+The emulator reloads system time into RTC registers when CyOS writes 0x04 to
+the control register (end of boot init), so the Set Date screen shows correct time.
 
 CyOS does NOT use the RTC as an autonomous clock. Instead:
 
@@ -643,7 +648,7 @@ CyOS does NOT use the RTC as an autonomous clock. Instead:
 4. **Fresh boot default**: Year = 100 (2000), Jan 1, 00:00:00. Time set via CyOS Settings
    persists in NVRAM.
 
-### CyOS I2C Bit-Bang Functions (EXPERIMENTAL - for future RTC fix)
+### CyOS I2C Bit-Bang Functions
 Disassembled from decompressed CyOS at 0x4A4558-0x4A4668:
 | Address | Function | Description |
 |---------|----------|-------------|

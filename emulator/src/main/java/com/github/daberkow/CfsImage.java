@@ -87,7 +87,7 @@ public class CfsImage {
     /** Add a file to the CFS image. Returns true on success. */
     public boolean addFile(String filename, byte[] fileData) {
         if (filename.length() > 58) {
-            System.err.println("[CFS] Filename too long: " + filename);
+            Log.log(Log.Category.CFS, "[CFS] Filename too long: " + filename);
             return false;
         }
 
@@ -103,7 +103,7 @@ public class CfsImage {
         // Check free space
         int freeBlocks = countFreeBlocks();
         if (freeBlocks < blocksNeeded) {
-            System.err.printf("[CFS] Not enough space: need %d blocks, have %d free%n",
+            Log.log(Log.Category.CFS, "[CFS] Not enough space: need %d blocks, have %d free",
                 blocksNeeded, freeBlocks);
             return false;
         }

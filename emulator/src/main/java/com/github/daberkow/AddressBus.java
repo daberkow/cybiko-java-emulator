@@ -281,7 +281,7 @@ public class AddressBus {
                     if (connObj != 0) {
                         v1RadioBootstrapped = true;
                         v1SavedConnObj = connObj;
-                        System.err.printf("[RADIO-V1] Bootstrap complete: radioObj=0x%06X connObj=0x%06X%n",
+                        Log.log(Log.Category.RADIO, "[RADIO-V1] Bootstrap complete: radioObj=0x%06X connObj=0x%06X",
                                 radioObjAddr, connObj);
                     } else {
                         // connObj is NULL — check if pool is ready before injecting
@@ -334,30 +334,32 @@ public class AddressBus {
                         }
                         v2CyIdPatched = true;
                         v1RadioBootstrapped = true;
-                        System.err.printf("[RADIO-V2] Patched CyID: 0x%08X -> 0x%08X (radioObj=0x%06X)%n",
+                        Log.log(Log.Category.RADIO, "[RADIO-V2] Patched CyID: 0x%08X -> 0x%08X (radioObj=0x%06X)",
                                 currentCyId, v1RadioId, radioObjAddr);
 
                         // Log initial beacon template
-                        StringBuilder beaconHex = new StringBuilder();
-                        int beaconAddr = radioObjAddr + 0x3020;
-                        for (int i = 0; i < 42; i++) {
-                            beaconHex.append(String.format("%02X ", read8(beaconAddr + i)));
+                        if (Log.isEnabled(Log.Category.RADIO)) {
+                            StringBuilder beaconHex = new StringBuilder();
+                            int beaconAddr2 = radioObjAddr + 0x3020;
+                            for (int i = 0; i < 42; i++) {
+                                beaconHex.append(String.format("%02X ", read8(beaconAddr2 + i)));
+                            }
+                            // Extract name from bytes 12-19
+                            byte[] nameBytes2 = new byte[8];
+                            for (int j = 0; j < 8; j++) nameBytes2[j] = (byte) read8(beaconAddr2 + 12 + j);
+                            int nameLen2 = 0;
+                            while (nameLen2 < 8 && nameBytes2[nameLen2] != 0) nameLen2++;
+                            String name = new String(nameBytes2, 0, nameLen2, java.nio.charset.StandardCharsets.US_ASCII);
+                            Log.log(Log.Category.RADIO, "[RADIO-V2] Beacon template: %s", beaconHex.toString().trim());
+                            Log.log(Log.Category.RADIO, "[RADIO-V2] Built beacon: name='%s' byte20=0x%02X",
+                                    name, read8(beaconAddr2 + 20));
                         }
-                        // Extract name from bytes 12-19
-                        byte[] nameBytes = new byte[8];
-                        for (int j = 0; j < 8; j++) nameBytes[j] = (byte) read8(beaconAddr + 12 + j);
-                        int nameLen = 0;
-                        while (nameLen < 8 && nameBytes[nameLen] != 0) nameLen++;
-                        String name = new String(nameBytes, 0, nameLen, java.nio.charset.StandardCharsets.US_ASCII);
-                        System.err.printf("[RADIO-V2] Beacon template: %s%n", beaconHex.toString().trim());
-                        System.err.printf("[RADIO-V2] Built beacon: name='%s' byte20=0x%02X%n",
-                                name, read8(beaconAddr + 20));
 
                         // Supplier reads beacon buffer LIVE from RAM on every call.
                         // V2 CyOS writes outgoing data (beacons, chat, etc.) to
                         // radioObj+0x3020 and the AVR reads it each poll/scan.
                         // A static snapshot would miss chat messages.
-                        final int liveBeaconAddr = beaconAddr;
+                        final int liveBeaconAddr = radioObjAddr + 0x3020;
                         java.util.Random rng = new java.util.Random();
                         radio.setV2BeaconSupplier(() -> {
                             byte[] beacon = new byte[42];
@@ -472,7 +474,7 @@ public class AddressBus {
             write8(V1_CYID_RAM_ADDR + 2, (v1RadioId >> 8) & 0xFF);
             write8(V1_CYID_RAM_ADDR + 3, v1RadioId & 0xFF);
             v1CyIdPatched = true;
-            System.out.printf("Patched V1 CyID in RAM: 0x%08X%n", v1RadioId);
+            Log.log(Log.Category.BOOT, "Patched V1 CyID in RAM: 0x%08X", v1RadioId);
         }
         // Populate connObj beacon frame data. CyOS never calls tick() to prepare
         // the beacon, so we fill in the required fields matching the RF frame format
@@ -720,7 +722,7 @@ public class AddressBus {
             return;
         }
         if (dmaDebugLog < 50) {
-            System.err.printf("[DMA] ch%d: src=0x%06X dst=0x%06X count=%d mode16=%b PC=0x%06X%n",
+            Log.log(Log.Category.DMA, "[DMA] ch%d: src=0x%06X dst=0x%06X count=%d mode16=%b PC=0x%06X",
                 channel, srcAddr, dstAddr, count, mode16, cpu != null ? cpu.getLastStartPC() : -1);
             dmaDebugLog++;
         }
@@ -1049,7 +1051,7 @@ public class AddressBus {
             int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
             if (pc >= 0x400000 || (config.type != MachineConfig.MachineType.XT && pc >= 0x200000)) {
                 int val = onChipRam.read8(onChipOffset(address));
-                System.err.printf("[IO-FALL] read8 0x%06X=0x%02X PC=0x%06X%n", address, val, pc);
+                Log.log(Log.Category.IO, "[IO-FALL] read8 0x%06X=0x%02X PC=0x%06X", address, val, pc);
                 ioFallthroughLog++;
             }
         }
@@ -1170,7 +1172,7 @@ public class AddressBus {
                 if (tieEnabled && sci0Tdre && (tieWasOff || sci0TxiDelay == 0)) {
                     sci0TxiDelay = SCI0_TXI_DELAY;
                     if (!v1DriverInitiatedTx && v1RadioBootstrapped) {
-                        System.err.printf("[RADIO-V1] CyOS enabled TIE (CyOS-initiated TX start)%n");
+                        Log.log(Log.Category.RADIO, "[RADIO-V1] CyOS enabled TIE (CyOS-initiated TX start)");
                     }
                 }
                 // V1: TIE 1→0 = TXI0 state 9 disabled TIE after TX complete.
@@ -1180,7 +1182,7 @@ public class AddressBus {
                         && (config.type == MachineConfig.MachineType.V1
                          || config.type == MachineConfig.MachineType.V2)) {
                     if (!v1DriverInitiatedTx) {
-                        System.err.printf("[RADIO-V1] CyOS-initiated TX complete (not from tickV1Radio)%n");
+                        Log.log(Log.Category.RADIO, "[RADIO-V1] CyOS-initiated TX complete (not from tickV1Radio)");
                     }
                     v1DriverInitiatedTx = false;
                     radio.v1TxComplete();
@@ -1309,7 +1311,7 @@ public class AddressBus {
         // trigger on DTCERF writes too, not just SCR writes.
         if (address == 0xFFFF35 && radio != null && radioSciChannel == 2) {
             int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
-            System.err.printf("[SCI2-DTCERF] write 0x%02X PC=0x%06X sci2Scr=0x%02X%n",
+            Log.log(Log.Category.RADIO, "[SCI2-DTCERF] write 0x%02X PC=0x%06X sci2Scr=0x%02X",
                     value & 0xFF, pc, sci2Scr);
             onChipRam.write8(onChipOffset(address), value);
             if ((value & 0xC0) != 0) {
@@ -1330,7 +1332,7 @@ public class AddressBus {
             // use destination 0x00000000 (not broadcast) so CyOS rejects them
             // immediately without queuing for processing.
             if (sci2PendingIndicator >= 0 && (value & 0x40) == 0) {
-                System.err.printf("[SCI2-DTC] Deferred 0x03+0x%02X delivered (DTCERF cleared at PC=0x%06X)%n",
+                Log.log(Log.Category.RADIO, "[SCI2-DTC] Deferred 0x03+0x%02X delivered (DTCERF cleared at PC=0x%06X)",
                         sci2PendingIndicator, pc);
                 radio.queueResponse(0x03); // Packet ACK for state 6
                 radio.queueResponse(sci2PendingIndicator); // Frame indicator for state 1
@@ -1492,7 +1494,7 @@ public class AddressBus {
         } else if (rxiDtc && receiveMode) {
             dtcBase = onChipOffset(0xFFFBE8); // RX block
         } else {
-            System.err.printf("[SCI2-DTC] mode mismatch: rx=%b tx=%b rxiDtc=%b txiDtc=%b%n",
+            Log.log(Log.Category.RADIO, "[SCI2-DTC] mode mismatch: rx=%b tx=%b rxiDtc=%b txiDtc=%b",
                     receiveMode, transmitMode, rxiDtc, txiDtc);
             return;
         }
@@ -1543,16 +1545,18 @@ public class AddressBus {
                     cpu.requestInterrupt(90); // TXI2
                 }
                 // Log TX DTC with hex + ASCII
-                StringBuilder txHex = new StringBuilder();
-                StringBuilder txAscii = new StringBuilder();
-                for (int i = 0; i < Math.min(count, 52); i++) {
-                    int b = txData[i] & 0xFF;
-                    txHex.append(String.format("%02X ", b));
-                    txAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
+                if (Log.isEnabled(Log.Category.RADIO)) {
+                    StringBuilder txHex = new StringBuilder();
+                    StringBuilder txAscii = new StringBuilder();
+                    for (int i = 0; i < Math.min(count, 52); i++) {
+                        int b = txData[i] & 0xFF;
+                        txHex.append(String.format("%02X ", b));
+                        txAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
+                    }
+                    Log.log(Log.Category.RADIO, "[SCI2-DTC] TX %d bytes MRA=0x%02X from 0x%06X ind=0x%02X: %s |%s|",
+                            count, mra, sarLo, sci2PendingIndicator,
+                            txHex.toString().trim(), txAscii);
                 }
-                System.err.printf("[SCI2-DTC] TX %d bytes MRA=0x%02X from 0x%06X ind=0x%02X: %s |%s|%n",
-                        count, mra, sarLo, sci2PendingIndicator,
-                        txHex.toString().trim(), txAscii);
             } else if (rxiDtc && receiveMode) {
                 // RX DTC: CyOS sets DTCERF bit 7 after receiving 0x32/0xC8 frame
                 // indicator, expecting hardware DTC to bulk-transfer N bytes from
@@ -1565,12 +1569,13 @@ public class AddressBus {
                 // avoid corrupting adjacent CyOS memory.
                 boolean destIncrement = (mra & 0x30) != 0; // DM bits 5:4
                 radio.prepareRxFrame(count);
-                StringBuilder rxHex = new StringBuilder();
-                StringBuilder rxAscii = new StringBuilder();
+                boolean logRx = Log.isEnabled(Log.Category.RADIO);
+                StringBuilder rxHex = logRx ? new StringBuilder() : null;
+                StringBuilder rxAscii = logRx ? new StringBuilder() : null;
                 for (int i = 0; i < count; i++) {
                     int b = radio.hasData() ? radio.read() : 0xFF;
                     write8(destIncrement ? (dar + i) : dar, b);
-                    if (i < 52) {
+                    if (logRx && i < 52) {
                         rxHex.append(String.format("%02X ", b));
                         rxAscii.append(b >= 0x20 && b < 0x7F ? (char) b : '.');
                     }
@@ -1581,17 +1586,19 @@ public class AddressBus {
                 // the completion handler regardless of byte value.
                 radio.queueResponse(0xFF);
                 // Log CyOS radio state for diagnostics
-                int radioObj = (read8(0x4B49FE) << 24) | (read8(0x4B49FF) << 16)
-                        | (read8(0x4B4A00) << 8) | read8(0x4B4A01);
-                int cyState = -1, chA = -1, chB = -1;
-                if (radioObj >= 0x400000 && radioObj < 0x600000) {
-                    cyState = read8(radioObj + 0x335A);
-                    chA = read8(radioObj + 0x335B);
-                    chB = read8(radioObj + 0x335C);
+                if (logRx) {
+                    int radioObj = (read8(0x4B49FE) << 24) | (read8(0x4B49FF) << 16)
+                            | (read8(0x4B4A00) << 8) | read8(0x4B4A01);
+                    int cyState = -1, chA = -1, chB = -1;
+                    if (radioObj >= 0x400000 && radioObj < 0x600000) {
+                        cyState = read8(radioObj + 0x335A);
+                        chA = read8(radioObj + 0x335B);
+                        chB = read8(radioObj + 0x335C);
+                    }
+                    Log.log(Log.Category.RADIO, "[SCI2-DTC] RX %d bytes MRA=0x%02X → 0x%06X (state=%d ch=%d/%d): %s |%s|",
+                            count, mra, dar, cyState, chA, chB,
+                            rxHex.toString().trim(), rxAscii);
                 }
-                System.err.printf("[SCI2-DTC] RX %d bytes MRA=0x%02X → 0x%06X (state=%d ch=%d/%d): %s |%s|%n",
-                        count, mra, dar, cyState, chA, chB,
-                        rxHex.toString().trim(), rxAscii);
             }
         }
 
@@ -1671,10 +1678,10 @@ public class AddressBus {
     private void logUnmapped(String op, int address) {
         if (unmappedLogCount < 200) {
             int pc = (cpu != null) ? cpu.getPC() : -1;
-            System.err.printf("Bus: unmapped %s at 0x%06X (PC=0x%06X)%n", op, address, pc);
+            Log.log(Log.Category.IO, "Bus: unmapped %s at 0x%06X (PC=0x%06X)", op, address, pc);
             unmappedLogCount++;
             if (unmappedLogCount == 200) {
-                System.err.println("Bus: suppressing further unmapped warnings (200 reached)");
+                Log.log(Log.Category.IO, "Bus: suppressing further unmapped warnings (200 reached)");
             }
         }
     }

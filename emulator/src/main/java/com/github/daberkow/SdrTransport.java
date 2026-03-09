@@ -69,7 +69,7 @@ public class SdrTransport implements RadioTransport {
         readerThread = new Thread(this::readLoop, "radio-sdr");
         readerThread.setDaemon(true);
         readerThread.start();
-        System.err.printf("[RADIO-SDR] Connected to %s:%d as device 0x%08X%n", host, port, deviceId);
+        Log.log(Log.Category.RADIO, "[RADIO-SDR] Connected to %s:%d as device 0x%08X", host, port, deviceId);
     }
 
     @Override

@@ -66,7 +66,7 @@ Please report issues on the [Issues tab](https://github.com/daberkow/cybiko-java
 | Sound (1-bit PWM speaker) | Yes | Yes | Yes |
 | MP3 Player | No | No | No |
 | Radio (LAN/SDR networking) | Yes | Partial | Yes |
-| RTC (real-time clock) | Partial | Partial | Partial |
+| RTC (real-time clock) | Yes | Yes | Yes |
 | App Loading (CFS + NVRAM) | Yes | Yes | Yes |
 | Keyboard | Yes | Yes | Yes |
 | DMA | N/A | N/A | Yes |
@@ -74,7 +74,7 @@ Please report issues on the [Issues tab](https://github.com/daberkow/cybiko-java
 **Notes:**
 - **V2** fully boots with CyOS v1.3.57. CyOS v1.3.58 stalls at the animated logo (RF hardware init never completes, same as MAME).
 - **MP3** playback is not implemented on any variant. Sound is 1-bit PWM only.
-- **RTC** communicates over I2C on all variants but does not function as an autonomous clock and gives the wrong date.
+- **RTC** shows correct date and time on all variants via I2C (PCF8593). Time advances in real-time during emulation.
 
 ### Radio Networking
 
@@ -120,6 +120,7 @@ cybiko-java/
 | `--mute` | Disable audio |
 | `--headless` | Run without GUI |
 | `--trace` | Instruction-level tracing (very slow) |
+| `--logging <cats>` | Enable log categories (comma-separated: cpu,radio,rtc,dma,io,status,boot,cfs,speaker,all,none; default: boot,status) |
 | `--radio lan\|sdr` | Enable radio (lan = UDP multicast, sdr = TCP bridge) |
 | `--radio-id <n>` | Set radio device ID (default: random) |
 | `--sdr-host <ip>` | SDR bridge host (default: localhost) |

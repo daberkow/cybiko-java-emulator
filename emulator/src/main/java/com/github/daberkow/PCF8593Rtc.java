@@ -41,7 +41,6 @@ public class PCF8593Rtc {
 
     // RTC registers (16 bytes)
     private final int[] data = new int[16];
-    private static final boolean DEBUG = false;
     private int debugTxnCount = -1; // -1 = unlimited debug
 
     // Time advancement
@@ -175,8 +174,8 @@ public class PCF8593Rtc {
                         if (dataRecv[0] == 0xA2 && dataRecvIndex >= 2) {
                             int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0x0F;
                             data[rtcPos] = received;
-                            if (DEBUG && debugTxnCount < 500) {
-                                System.err.printf("[RTC] WRITE reg[%d]=0x%02X%n", rtcPos, received);
+                            if (Log.isEnabled(Log.Category.RTC) && debugTxnCount < 500) {
+                                Log.log(Log.Category.RTC, "[RTC] WRITE reg[%d]=0x%02X", rtcPos, received);
                             }
                             // CyOS boot init resets time to Jan 1, 2000, then writes
                             // 0x04 to reg 0 to start counting. When we see that write,
@@ -201,8 +200,8 @@ public class PCF8593Rtc {
                     bits++;
                     // After 8 data bits + ACK
                     if (bits > 8) {
-                        if (DEBUG && debugTxnCount < 500) {
-                            System.err.printf("[RTC] READ reg[%d]=0x%02X%n", pos, data[pos]);
+                        if (Log.isEnabled(Log.Category.RTC) && debugTxnCount < 500) {
+                            Log.log(Log.Category.RTC, "[RTC] READ reg[%d]=0x%02X", pos, data[pos]);
                         }
                         // Check master ACK/NACK
                         if (pinSda != 0) {
@@ -232,24 +231,22 @@ public class PCF8593Rtc {
                 bits = 0;
                 dataRecvIndex = 0;
                 clearBufferRx();
-                if (DEBUG && debugTxnCount < 500) {
-                    System.err.printf("[RTC] --- START (txn %d) ---%n", debugTxnCount);
+                if (Log.isEnabled(Log.Category.RTC) && debugTxnCount < 500) {
+                    Log.log(Log.Category.RTC, "[RTC] --- START (txn %d) ---", debugTxnCount);
                 }
             }
             // STOP: SDA low -> high while SCL high
             if (state != 0 && pinSda == 0) {
                 active = false;
                 inp = 1; // Release SDA on stop
-                if (DEBUG && debugTxnCount < 500) {
-                    System.err.printf("[RTC] --- STOP (txn %d, pendingReload=%b) ---%n", debugTxnCount, pendingReload);
+                if (Log.isEnabled(Log.Category.RTC) && debugTxnCount < 500) {
+                    Log.log(Log.Category.RTC, "[RTC] --- STOP (txn %d, pendingReload=%b) ---", debugTxnCount, pendingReload);
                 }
                 debugTxnCount++;
                 if (pendingReload) {
                     pendingReload = false;
                     reloadSystemTime();
-                    if (DEBUG) {
-                        System.err.printf("[RTC] RELOAD done: reg7=0x%02X reg5=0x%02X reg6=0x%02X%n", data[7], data[5], data[6]);
-                    }
+                    Log.log(Log.Category.RTC, "[RTC] RELOAD done: reg7=0x%02X reg5=0x%02X reg6=0x%02X", data[7], data[5], data[6]);
                 }
             }
         }

@@ -90,7 +90,7 @@ public class UdpMulticastTransport implements RadioTransport {
         listenerThread = new Thread(this::listenLoop, "radio-udp");
         listenerThread.setDaemon(true);
         listenerThread.start();
-        System.err.printf("[RADIO-UDP] Joined %s:%d as device 0x%08X%n",
+        Log.log(Log.Category.RADIO, "[RADIO-UDP] Joined %s:%d as device 0x%08X",
                 group.getHostAddress(), port, deviceId);
     }
 
@@ -160,7 +160,7 @@ public class UdpMulticastTransport implements RadioTransport {
                 byte[] payload = new byte[pkt.getLength() - HEADER_SIZE];
                 bb.get(payload);
 
-                System.err.printf("[RADIO-UDP] RX from 0x%08X ch=%d %d bytes%n",
+                Log.log(Log.Category.RADIO, "[RADIO-UDP] RX from 0x%08X ch=%d %d bytes",
                         senderId, channel, payload.length);
                 PacketListener l = listener;
                 if (l != null) {
