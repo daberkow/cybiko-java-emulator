@@ -606,14 +606,9 @@ public class RadioCoProcessor {
     private void v2QueueResponse() {
         rxQueue.add(0x03); // ACK
 
-        // Brief wait for UDP frames
-        if (receivedFrames.isEmpty() && transport != null) {
-            synchronized (receivedFrames) {
-                if (receivedFrames.isEmpty()) {
-                    try { receivedFrames.wait(10); } catch (InterruptedException ignored) {}
-                }
-            }
-        }
+        // No blocking wait for V2 — processCommand2 runs inline during cpu.step().
+        // Blocking here stalls the entire CPU, causing UI freezes. V2 relies on
+        // frames already in receivedFrames (delivered by UDP listener thread).
 
         // V2 CyOS setup_rx (0x118EEC) uses indicator to select frame handling:
         //   0x32 → has_frame=1 → connObj[0xD2]=1 → reads 50 bytes (real data)
@@ -626,14 +621,12 @@ public class RadioCoProcessor {
         if (!receivedFrames.isEmpty()) {
             ReceivedFrame next = receivedFrames.peek();
             frameInfo = String.format("%d bytes from 0x%08X", next.data().length, next.senderId());
-            if (lastCommandType == CMD_POLL && next.data().length > 50) {
-                indicator = 0xC8; // Poll suppresses large
-                frameInfo += " (poll-suppressed)";
-            } else {
-                indicator = 0x32; // Has real data (50 bytes)
-                rxFrameReady = true;
-                hasFrame = true;
-            }
+            // V2 does NOT poll-suppress large frames. Unlike XT, V2 doesn't switch
+            // to SCAN (0xCF) during chat — it stays on POLL (0x30). If we suppress
+            // large frames during polls, chat messages from XT never get delivered.
+            rxFrameReady = true;
+            hasFrame = true;
+            indicator = (next.data().length > 50) ? 0xC8 : 0x32;
         } else {
             indicator = 0xC8; // No data (200 bytes)
         }

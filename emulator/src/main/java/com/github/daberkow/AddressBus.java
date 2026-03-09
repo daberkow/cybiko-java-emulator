@@ -249,8 +249,13 @@ public class AddressBus {
         if (radio != null && radioSciChannel == 0 && !sci0Rdrf && radio.hasData()) {
             sci0Rdr = radio.read();
             sci0Rdrf = true;
-            // Fire RXI0 if RIE is enabled in SCR
-            if ((sci0Scr & 0x40) != 0 && cpu != null) {
+            // Fire RXI0 if RIE is enabled in SCR.
+            // V2 uses polled reads (tight R SSR / R RDR loop at 0x11890C/0x11890E),
+            // NOT interrupt-driven reads. Firing RXI0 during polling causes the ISR
+            // to consume bytes that the polling loop also reads, corrupting the frame.
+            // V1 uses interrupt-driven reads via v1TxComplete() response path.
+            if ((sci0Scr & 0x40) != 0 && cpu != null
+                    && config.type != MachineConfig.MachineType.V2) {
                 cpu.requestInterrupt(81); // RXI0
             }
         }
@@ -1145,10 +1150,14 @@ public class AddressBus {
                 if (sci0Scr == 0x00) {
                     sci0Rdrf = false;
                 }
-                // If RIE just enabled and RDRF is already set, fire RXI0
+                // If RIE just enabled and RDRF is already set, fire RXI0.
+                // Skip for V2: V2 uses polled SCI0 reads, not interrupt-driven.
+                // Firing RXI0 during polling causes ISR to consume bytes meant for
+                // the polling loop, corrupting radio frame data.
                 boolean rieEnabled = (sci0Scr & 0x40) != 0;
                 boolean rieWasOff = (oldScr & 0x40) == 0;
-                if (rieEnabled && rieWasOff && sci0Rdrf && cpu != null) {
+                if (rieEnabled && rieWasOff && sci0Rdrf && cpu != null
+                        && config.type != MachineConfig.MachineType.V2) {
                     cpu.requestInterrupt(81); // RXI0
                 }
                 // If TIE just enabled and TDRE is already set, schedule first TXI0
