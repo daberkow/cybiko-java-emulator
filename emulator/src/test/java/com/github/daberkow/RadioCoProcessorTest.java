@@ -319,8 +319,8 @@ class RadioCoProcessorTest {
     @Test void prepareRxFrameNoFrameFillsNullPattern() {
         RadioCoProcessor radio = new RadioCoProcessor();
         radio.prepareRxFrame(5);
-        assertEquals(0xFE, radio.read()); // Null frame: 0xFE dest so CyOS rejects
-        for (int i = 1; i < 5; i++) {
+        // Null frame: all 0x00 so CyOS fails broadcast/listener check and discards
+        for (int i = 0; i < 5; i++) {
             assertEquals(0x00, radio.read());
         }
         assertFalse(radio.hasData());
@@ -363,10 +363,9 @@ class RadioCoProcessorTest {
 
     @Test void prepareRxNullReadNoFrame() {
         RadioCoProcessor radio = new RadioCoProcessor();
-        // No frame queued — 50-byte null read: 0xFE + zeros
+        // No frame queued — 50-byte null read: all 0x00
         radio.prepareRxFrame(50);
-        assertEquals(0xFE, radio.read()); // Null frame marker
-        for (int i = 1; i < 50; i++) {
+        for (int i = 0; i < 50; i++) {
             assertEquals(0x00, radio.read());
         }
         assertFalse(radio.hasData());
@@ -450,8 +449,7 @@ class RadioCoProcessorTest {
 
         // The 50-byte null RX DTC should NOT consume the large frame
         radio.prepareRxFrame(50);
-        assertEquals(0xFE, radio.read()); // Null frame marker
-        for (int i = 1; i < 50; i++) {
+        for (int i = 0; i < 50; i++) {
             assertEquals(0x00, radio.read());
         }
 

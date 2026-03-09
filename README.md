@@ -52,7 +52,7 @@ Letters map directly to your keyboard. Arrow keys for navigation, Enter/Space/Ta
 
 ## About
 
-This project was something I was interested in, and I wanted to test out [Claude Code](https://docs.anthropic.com/en/docs/claude-code). After getting the base emulator working, I went about adding new features like a manager to manage the games, and working on wireless communications.
+This project was something I was interested in, and I wanted to test out Claude Code. After getting the base emulator working, I went about adding new features like a manager to manage the games, and working on wireless communications.
 
 This is the main repo for me working on this project. A few others have been made for a [C Version](https://github.com/daberkow/cybiko-c-emulator) and a port to the [LilyGo T-Deck](https://github.com/daberkow/cybiko-lilygo). Java is my best known language, thus I started here to be able to debug.
 
