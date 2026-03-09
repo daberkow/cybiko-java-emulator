@@ -42,7 +42,7 @@ public class PCF8593Rtc {
     // RTC registers (16 bytes)
     private final int[] data = new int[16];
     private static final boolean DEBUG = false;
-    private int debugTxnCount = 0;
+    private int debugTxnCount = -1; // -1 = unlimited debug
 
     // Time advancement
     private long lastTickNanos;
@@ -175,7 +175,7 @@ public class PCF8593Rtc {
                         if (dataRecv[0] == 0xA2 && dataRecvIndex >= 2) {
                             int rtcPos = (dataRecv[1] + (dataRecvIndex - 2)) & 0x0F;
                             data[rtcPos] = received;
-                            if (DEBUG && debugTxnCount < 50) {
+                            if (DEBUG && debugTxnCount < 500) {
                                 System.err.printf("[RTC] WRITE reg[%d]=0x%02X%n", rtcPos, received);
                             }
                             // CyOS boot init resets time to Jan 1, 2000, then writes
@@ -192,11 +192,16 @@ public class PCF8593Rtc {
                 }
                 case SEND -> {
                     // RTC -> HOST: clock out a bit
-                    inp = (data[pos] >> (7 - bits)) & 1;
+                    if (bits < 8) {
+                        inp = (data[pos] >> (7 - bits)) & 1;
+                    } else if (bits == 8) {
+                        // ACK cycle: release SDA so master can drive ACK/NACK
+                        inp = 1;
+                    }
                     bits++;
                     // After 8 data bits + ACK
                     if (bits > 8) {
-                        if (DEBUG && debugTxnCount < 50) {
+                        if (DEBUG && debugTxnCount < 500) {
                             System.err.printf("[RTC] READ reg[%d]=0x%02X%n", pos, data[pos]);
                         }
                         // Check master ACK/NACK
@@ -227,7 +232,7 @@ public class PCF8593Rtc {
                 bits = 0;
                 dataRecvIndex = 0;
                 clearBufferRx();
-                if (DEBUG && debugTxnCount < 50) {
+                if (DEBUG && debugTxnCount < 500) {
                     System.err.printf("[RTC] --- START (txn %d) ---%n", debugTxnCount);
                 }
             }
@@ -235,7 +240,7 @@ public class PCF8593Rtc {
             if (state != 0 && pinSda == 0) {
                 active = false;
                 inp = 1; // Release SDA on stop
-                if (DEBUG && debugTxnCount < 50) {
+                if (DEBUG && debugTxnCount < 500) {
                     System.err.printf("[RTC] --- STOP (txn %d, pendingReload=%b) ---%n", debugTxnCount, pendingReload);
                 }
                 debugTxnCount++;

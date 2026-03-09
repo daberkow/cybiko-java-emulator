@@ -1348,7 +1348,9 @@ public class H8SCpu {
                 if (hi == 0x50) {
                     int rs = (lo >> 4) & 0xF;
                     int rd = lo & 0xF;
-                    int result = getRegB(rs) * getRegB(rd);
+                    // Rs is a byte register, Rd is a word register.
+                    // The low byte of word register Rd is byte register rd|8 (RdL).
+                    int result = (getRegB(rs) & 0xFF) * (getR(rd) & 0xFF);
                     setR(rd, result & 0xFFFF);
                     trace("MULXU.B R%dL, R%d", rs, rd);
                 } else if (hi == 0x51) {
