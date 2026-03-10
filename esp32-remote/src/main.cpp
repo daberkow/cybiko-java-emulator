@@ -12,7 +12,7 @@
 #define WIFI_PASS "your_password"
 #endif
 #ifndef SERVER_IP
-#define SERVER_IP "192.168.1.100"
+#define SERVER_IP "your_server_ip"
 #endif
 #ifndef SERVER_PORT
 #define SERVER_PORT 6502
