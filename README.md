@@ -75,7 +75,7 @@ This project was something I was interested in, and I wanted to test out Claude 
 
 This is the main repo for me working on this project. A few others have been made for a [C Version](https://github.com/daberkow/cybiko-c-emulator) and a port to the [LilyGo T-Deck](https://github.com/daberkow/cybiko-lilygo). Java is my best known language, thus I started here to be able to debug.
 
-Please report issues on the [Issues tab](https://github.com/daberkow/cybiko-java-emulator/issues).
+Please report issues or feature ideas on the [Issues tab](https://github.com/daberkow/cybiko-java-emulator/issues).
 
 ## Current Functionality
 
