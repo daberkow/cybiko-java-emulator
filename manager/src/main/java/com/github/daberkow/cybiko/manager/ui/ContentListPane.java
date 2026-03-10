@@ -5,6 +5,7 @@ import com.github.daberkow.cybiko.manager.model.CfsFile;
 import com.github.daberkow.cybiko.manager.model.ContentItem;
 import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
 import com.github.daberkow.cybiko.manager.model.ContentItem.NvramItem;
+import com.github.daberkow.cybiko.manager.io.CybikoIconRenderer;
 import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -13,6 +14,8 @@ import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.DataFormat;
 import javafx.scene.input.KeyCode;
@@ -21,7 +24,9 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 
+import java.nio.file.Path;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -49,6 +54,7 @@ public class ContentListPane extends VBox {
     private final TableView<ContentItem> table = new TableView<>();
     private final ObservableList<ContentItem> items = FXCollections.observableArrayList();
     private final FilteredList<ContentItem> filteredItems = new FilteredList<>(items, p -> true);
+    private final Map<Path, Image> iconCache = new HashMap<>();
 
     @SuppressWarnings("unchecked")
     public ContentListPane() {
@@ -88,6 +94,46 @@ public class ContentListPane extends VBox {
         TableColumn<ContentItem, String> nameCol = new TableColumn<>("Name");
         nameCol.setCellValueFactory(p -> new ReadOnlyStringWrapper(p.getValue().name()));
         nameCol.setPrefWidth(250);
+        nameCol.setCellFactory(col -> new TableCell<>() {
+            private final ImageView iv = new ImageView();
+            private final Label label = new Label();
+            private final HBox box = new HBox(4, iv, label);
+            {
+                iv.setFitWidth(24);
+                iv.setFitHeight(24);
+                iv.setPreserveRatio(true);
+                iv.setSmooth(false);
+                box.setAlignment(Pos.CENTER_LEFT);
+            }
+            @Override
+            protected void updateItem(String name, boolean empty) {
+                super.updateItem(name, empty);
+                if (empty || name == null) {
+                    setGraphic(null);
+                    setText(null);
+                    return;
+                }
+                label.setText(name);
+                Image icon = null;
+                int idx = getIndex();
+                if (idx >= 0 && idx < getTableView().getItems().size()) {
+                    var item = getTableView().getItems().get(idx);
+                    if (item instanceof LibraryItem li && li.entry().iconData() != null) {
+                        icon = iconCache.computeIfAbsent(li.entry().path(),
+                            p -> CybikoIconRenderer.toImage(li.entry().iconData()));
+                    }
+                }
+                if (icon != null) {
+                    iv.setImage(icon);
+                    setGraphic(box);
+                    setText(null);
+                } else {
+                    iv.setImage(null);
+                    setGraphic(null);
+                    setText(name);
+                }
+            }
+        });
 
         // Type column
         TableColumn<ContentItem, String> extCol = new TableColumn<>("Type");
@@ -219,6 +265,8 @@ public class ContentListPane extends VBox {
     public void setFiles(List<CfsFile> fileList, String imageName) {
         setNvramFiles(fileList, imageName);
     }
+
+    public void clearIconCache() { iconCache.clear(); }
 
     public void clear() {
         items.clear();

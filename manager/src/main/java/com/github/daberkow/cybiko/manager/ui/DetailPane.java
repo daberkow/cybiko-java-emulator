@@ -1,5 +1,6 @@
 package com.github.daberkow.cybiko.manager.ui;
 
+import com.github.daberkow.cybiko.manager.io.CybikoIconRenderer;
 import com.github.daberkow.cybiko.manager.model.CfsFile;
 import com.github.daberkow.cybiko.manager.model.ContentItem;
 import com.github.daberkow.cybiko.manager.model.ContentItem.LibraryItem;
@@ -7,6 +8,8 @@ import com.github.daberkow.cybiko.manager.model.ContentItem.NvramItem;
 import javafx.geometry.Insets;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 
@@ -29,6 +32,7 @@ public class DetailPane extends VBox {
     private final Label blocksValue = new Label();
     private final Label fileIdValue = new Label();
     private final Label statusValue = new Label();
+    private final ImageView iconPreview = new ImageView();
 
     private final VBox blocksRow;
     private final VBox fileIdRow;
@@ -56,9 +60,17 @@ public class DetailPane extends VBox {
 
         content.setPadding(new Insets(4, 0, 0, 0));
 
+        iconPreview.setFitWidth(96);
+        iconPreview.setFitHeight(96);
+        iconPreview.setPreserveRatio(true);
+        iconPreview.setSmooth(false);
+        iconPreview.setVisible(false);
+        iconPreview.setManaged(false);
+
         blocksRow = makeRow("Blocks", blocksValue);
         fileIdRow = makeRow("File ID", fileIdValue);
 
+        content.getChildren().add(iconPreview);
         content.getChildren().addAll(
             makeRow("Name", nameValue),
             makeRow("Size", sizeValue),
@@ -108,6 +120,18 @@ public class DetailPane extends VBox {
         }
 
         nameValue.setText(item.name());
+
+        // Show icon for library items with icon data
+        if (item instanceof LibraryItem li && li.entry().iconData() != null) {
+            Image icon = CybikoIconRenderer.toImage(li.entry().iconData());
+            iconPreview.setImage(icon);
+            iconPreview.setVisible(true);
+            iconPreview.setManaged(true);
+        } else {
+            iconPreview.setImage(null);
+            iconPreview.setVisible(false);
+            iconPreview.setManaged(false);
+        }
 
         long bytes = item.sizeBytes();
         if (bytes < 1024) {
