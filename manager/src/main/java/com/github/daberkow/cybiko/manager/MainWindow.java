@@ -110,6 +110,7 @@ public class MainWindow extends StackPane {
         sidebar.setOnRemoveLibraryFolder(this::removeLibraryFolder);
         sidebar.setOnCloseNvram(this::closeNvram);
         sidebar.setOnLaunchEmulator(this::launchEmulator);
+        sidebar.setOnRefreshNvram(this::refreshNvramFromDisk);
 
         // Wire content list selection
         contentList.setOnItemSelected(item -> detail.showItem(item));
@@ -230,6 +231,9 @@ public class MainWindow extends StackPane {
         MenuItem exportCsvItem = new MenuItem("Export as CSV...");
         exportCsvItem.setOnAction(e -> exportCsv());
 
+        MenuItem refreshNvramItem = new MenuItem("Refresh from Disk");
+        refreshNvramItem.setOnAction(e -> refreshNvramFromDisk());
+
         MenuItem launchItem = new MenuItem("Launch Emulator...");
         launchItem.setOnAction(e -> launchEmulator());
 
@@ -240,7 +244,7 @@ public class MainWindow extends StackPane {
             new SeparatorMenuItem(),
             exportCsvItem,
             new SeparatorMenuItem(),
-            launchItem
+            refreshNvramItem, launchItem
         );
 
         // --- Help menu ---
@@ -806,6 +810,31 @@ public class MainWindow extends StackPane {
         }
 
         return report.toString();
+    }
+
+    private void refreshNvramFromDisk() {
+        if (currentImage == null || currentPath == null) {
+            showError("No NVRAM Image", "Open an NVRAM image first.");
+            return;
+        }
+        if (currentImage.isModified()) {
+            Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+            alert.setTitle("Unsaved Changes");
+            alert.setHeaderText("Discard unsaved changes?");
+            alert.setContentText("Refreshing will reload the file from disk and lose any changes you've made.");
+            Optional<ButtonType> result = showDialog(alert);
+            if (result.isEmpty() || result.get() != ButtonType.OK) return;
+        }
+        try {
+            CfsImage image = CfsReader.read(currentPath);
+            sidebar.replaceImage(currentImage, image, currentPath);
+            currentImage = image;
+            refreshFileList();
+            detail.showItem(null);
+            updateTitle();
+        } catch (Exception ex) {
+            showError("Failed to reload image", ex.getMessage());
+        }
     }
 
     // ---- Emulator launch ----

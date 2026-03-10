@@ -75,6 +75,7 @@ public class SidebarPane extends VBox {
     private Consumer<ImageEntry> onNvramSelected;
     private Consumer<ImageEntry> onCloseNvram;
     private Runnable onLaunchEmulator;
+    private Runnable onRefreshNvram;
     private Consumer<LibraryFolder> onLibrarySelected;
     private Runnable onAddLibraryFolder;
     private Consumer<LibraryFolder> onRemoveLibraryFolder;
@@ -167,6 +168,10 @@ public class SidebarPane extends VBox {
             launchItem.setOnAction(e -> {
                 if (onLaunchEmulator != null) onLaunchEmulator.run();
             });
+            MenuItem refreshItem = new MenuItem("Refresh from Disk");
+            refreshItem.setOnAction(e -> {
+                if (onRefreshNvram != null) onRefreshNvram.run();
+            });
             MenuItem closeItem = new MenuItem("Close");
             closeItem.setOnAction(e -> {
                 ImageEntry entry = cell.getItem();
@@ -174,7 +179,7 @@ public class SidebarPane extends VBox {
                     onCloseNvram.accept(entry);
                 }
             });
-            contextMenu.getItems().addAll(launchItem, new SeparatorMenuItem(), closeItem);
+            contextMenu.getItems().addAll(launchItem, refreshItem, new SeparatorMenuItem(), closeItem);
             cell.setContextMenu(contextMenu);
 
             return cell;
@@ -352,6 +357,18 @@ public class SidebarPane extends VBox {
         }
     }
 
+    /** Replace an NVRAM image in-place (e.g. after reloading from disk). */
+    public void replaceImage(CfsImage oldImage, CfsImage newImage, Path path) {
+        changeCounts.remove(oldImage);
+        for (int i = 0; i < nvramEntries.size(); i++) {
+            if (nvramEntries.get(i).image() == oldImage) {
+                nvramEntries.set(i, new ImageEntry(path, newImage));
+                nvramList.getSelectionModel().select(i);
+                return;
+            }
+        }
+    }
+
     /** Remove an NVRAM image from the sidebar and clean up change counts. */
     public void removeImage(CfsImage image) {
         changeCounts.remove(image);
@@ -364,6 +381,10 @@ public class SidebarPane extends VBox {
 
     public void setOnLaunchEmulator(Runnable callback) {
         this.onLaunchEmulator = callback;
+    }
+
+    public void setOnRefreshNvram(Runnable callback) {
+        this.onRefreshNvram = callback;
     }
 
     /** Get all NVRAM entries for unsaved changes check. */
