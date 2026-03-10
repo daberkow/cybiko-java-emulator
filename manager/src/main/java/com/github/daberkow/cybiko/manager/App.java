@@ -4,6 +4,7 @@ import atlantafx.base.theme.PrimerDark;
 import atlantafx.base.theme.PrimerLight;
 import com.github.daberkow.cybiko.manager.io.LibraryConfig;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.stage.Stage;
 
@@ -49,6 +50,11 @@ public class App extends Application {
         });
 
         primaryStage.show();
+    }
+
+    @Override
+    public void stop() {
+        System.exit(0);
     }
 
     public static void main(String[] args) {

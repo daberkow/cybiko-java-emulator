@@ -74,6 +74,7 @@ public class SidebarPane extends VBox {
 
     private Consumer<ImageEntry> onNvramSelected;
     private Consumer<ImageEntry> onCloseNvram;
+    private Runnable onLaunchEmulator;
     private Consumer<LibraryFolder> onLibrarySelected;
     private Runnable onAddLibraryFolder;
     private Consumer<LibraryFolder> onRemoveLibraryFolder;
@@ -162,6 +163,10 @@ public class SidebarPane extends VBox {
             });
 
             ContextMenu contextMenu = new ContextMenu();
+            MenuItem launchItem = new MenuItem("Launch Emulator...");
+            launchItem.setOnAction(e -> {
+                if (onLaunchEmulator != null) onLaunchEmulator.run();
+            });
             MenuItem closeItem = new MenuItem("Close");
             closeItem.setOnAction(e -> {
                 ImageEntry entry = cell.getItem();
@@ -169,7 +174,7 @@ public class SidebarPane extends VBox {
                     onCloseNvram.accept(entry);
                 }
             });
-            contextMenu.getItems().add(closeItem);
+            contextMenu.getItems().addAll(launchItem, new SeparatorMenuItem(), closeItem);
             cell.setContextMenu(contextMenu);
 
             return cell;
@@ -355,6 +360,10 @@ public class SidebarPane extends VBox {
 
     public void setOnCloseNvram(Consumer<ImageEntry> callback) {
         this.onCloseNvram = callback;
+    }
+
+    public void setOnLaunchEmulator(Runnable callback) {
+        this.onLaunchEmulator = callback;
     }
 
     /** Get all NVRAM entries for unsaved changes check. */

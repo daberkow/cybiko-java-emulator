@@ -19,15 +19,17 @@ ROMs can be found at the [Cybiko Archive on archive.org](https://archive.org/det
 
 ### 2. Download and Run
 
-Grab the latest zip from the [Releases page](https://github.com/daberkow/cybiko-java-emulator/releases), unzip it, and place your ROM files in the same folder.
+Grab the latest `.jar` from the [Releases page](https://github.com/daberkow/cybiko-java-emulator/releases) and place your ROM files in the same folder. This is a single-file fat JAR — no unzipping or extra dependencies needed.
 
 ```bash
 # Cybiko Xtreme (default)
-bin/cybiko-emulator cyrom150.bin cyos_v1508.bin
+java -jar Cybiko-Emulator-*.jar cyrom150.bin cyos_v1508.bin
 
 # Cybiko Classic V1
-bin/cybiko-emulator --machine v1 cyrom112.bin flash_v1246.bin
+java -jar Cybiko-Emulator-*.jar --machine v1 cyrom112.bin flash_v1246.bin
 ```
+
+> A full distribution ZIP with launch scripts is also available on the releases page if you prefer that.
 
 ### 3. Load Apps
 
@@ -35,10 +37,10 @@ Download `.app` files from the [Cybiko Archive](https://archive.org/details/cybi
 
 ```bash
 # Load an app and save to persistent NVRAM
-bin/cybiko-emulator cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app
+java -jar Cybiko-Emulator-*.jar cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app
 
 # Next time, just boot — your apps and settings are saved
-bin/cybiko-emulator cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram
+java -jar Cybiko-Emulator-*.jar cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram
 ```
 
 ### 4. Keyboard

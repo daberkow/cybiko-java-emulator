@@ -44,10 +44,14 @@ jobs:
         run: |
           cp "emulator/build/distributions/cybiko-emulator-${EMU_VER}.zip" \
              "emulator/build/distributions/Cybiko-Emulator-${EMU_VER}.zip"
+          cp emulator/build/libs/emulator-${EMU_VER}-all.jar \
+             "emulator/build/libs/Cybiko-Emulator-${EMU_VER}.jar"
           MGR_VER=$(cat manager/VERSION | tr -d '[:space:]')
           MGR_FULL="${MGR_VER}.${GITHUB_RUN_NUMBER}"
           cp "manager/build/distributions/cybiko-nvram-manager-${MGR_FULL}.zip" \
              "manager/build/distributions/Cybiko-NVRAM-Manager-${MGR_FULL}.zip"
+          cp "manager/build/libs/manager-${MGR_FULL}-all.jar" \
+             "manager/build/libs/Cybiko-NVRAM-Manager-${MGR_FULL}.jar"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -58,28 +62,29 @@ jobs:
             ## Cybiko Emulator ${{ steps.version.outputs.tag }}
 
             ### Downloads
-            - **Cybiko-Emulator** — the emulator (Swing UI, all machine variants)
-            - **Cybiko-NVRAM-Manager** — desktop app for managing Cybiko flash images (JavaFX)
+            - **Cybiko-Emulator-${{ steps.version.outputs.version }}.jar** — single-file fat JAR (easiest, just `java -jar`)
+            - **Cybiko-Emulator-${{ steps.version.outputs.version }}.zip** — full distribution with launch scripts
+            - **Cybiko-NVRAM-Manager .jar** — NVRAM manager fat JAR (just `java -jar`)
+            - **Cybiko-NVRAM-Manager .zip** — NVRAM manager with launch scripts
 
-            Both require [Java 21+](https://adoptium.net/).
+            All require [Java 21+](https://adoptium.net/).
 
             ### Quick Start
             ```bash
-            unzip Cybiko-Emulator-${{ steps.version.outputs.version }}.zip
-            cd cybiko-emulator-${{ steps.version.outputs.version }}
-
             # Cybiko Xtreme
-            bin/cybiko-emulator cyrom150.bin cyos_v1508.bin
+            java -jar Cybiko-Emulator-${{ steps.version.outputs.version }}.jar cyrom150.bin cyos_v1508.bin
 
             # Cybiko Classic V1
-            bin/cybiko-emulator --machine v1 cyrom112.bin flash_v1246.bin
+            java -jar Cybiko-Emulator-${{ steps.version.outputs.version }}.jar --machine v1 cyrom112.bin flash_v1246.bin
 
             # Load an app with persistent NVRAM
-            bin/cybiko-emulator cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app
+            java -jar Cybiko-Emulator-${{ steps.version.outputs.version }}.jar cyrom150.bin cyos_v1508.bin --nvram cybiko.nvram --app calc.app
             ```
 
             See the [README](https://github.com/daberkow/cybiko-java-emulator#quick-start) for full usage and ROM download links.
           files: |
+            emulator/build/libs/Cybiko-Emulator-*.jar
             emulator/build/distributions/Cybiko-Emulator-*.zip
+            manager/build/libs/Cybiko-NVRAM-Manager-*.jar
             manager/build/distributions/Cybiko-NVRAM-Manager-*.zip
           generate_release_notes: true

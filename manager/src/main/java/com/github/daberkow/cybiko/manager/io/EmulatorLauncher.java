@@ -64,11 +64,16 @@ public final class EmulatorLauncher {
     public static Path searchEmulatorJar(List<Path> searchDirs) {
         for (Path dir : searchDirs) {
             try (var stream = Files.list(dir)) {
-                Path found = stream
+                List<Path> jars = stream
                         .filter(p -> p.getFileName().toString().startsWith("emulator"))
                         .filter(p -> p.getFileName().toString().endsWith(".jar"))
+                        .toList();
+                // Prefer the fat JAR (-all.jar) over the regular one
+                Path fatJar = jars.stream()
+                        .filter(p -> p.getFileName().toString().contains("-all"))
                         .findFirst().orElse(null);
-                if (found != null) return found;
+                if (fatJar != null) return fatJar;
+                if (!jars.isEmpty()) return jars.get(0);
             } catch (IOException ignored) {}
         }
         return null;
