@@ -12,12 +12,14 @@ import java.time.ZoneId;
  * @param name         filename (e.g., "calc.app")
  * @param sizeBytes    file size in bytes
  * @param lastModified last modification time
+ * @param iconData     raw root.ico bytes, or null if unavailable
  */
 public record AppEntry(
     Path path,
     String name,
     long sizeBytes,
-    Instant lastModified
+    Instant lastModified,
+    byte[] iconData
 ) {
 
     /** File extension (lowercase), or empty string if none. */

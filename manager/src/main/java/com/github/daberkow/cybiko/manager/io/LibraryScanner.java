@@ -35,11 +35,20 @@ public final class LibraryScanner {
                 })
                 .map(p -> {
                     try {
+                        byte[] iconData = null;
+                        try {
+                            byte[] appBytes = Files.readAllBytes(p);
+                            var parser = new CybikoAppParser(appBytes);
+                            iconData = parser.extractFile("root.ico");
+                        } catch (Exception e) {
+                            // Icon extraction failure is non-fatal
+                        }
                         return new AppEntry(
                             p,
                             p.getFileName().toString(),
                             Files.size(p),
-                            Files.getLastModifiedTime(p).toInstant()
+                            Files.getLastModifiedTime(p).toInstant(),
+                            iconData
                         );
                     } catch (IOException e) {
                         return null;
