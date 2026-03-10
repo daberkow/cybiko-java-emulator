@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.zip.CRC32;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -49,5 +50,11 @@ class CybikoDecompressorTest {
         assertEquals(0x01, decompressed[1] & 0xFF);
         assertEquals(48, decompressed[2] & 0xFF);
         assertEquals(47, decompressed[3] & 0xFF);
+
+        // Verify full content matches filer.exe reference output (CRC32 of all 572 bytes)
+        CRC32 crc = new CRC32();
+        crc.update(decompressed);
+        assertEquals(0x576FFFB3L, crc.getValue(),
+                "Decompressed content does not match filer.exe reference output");
     }
 }

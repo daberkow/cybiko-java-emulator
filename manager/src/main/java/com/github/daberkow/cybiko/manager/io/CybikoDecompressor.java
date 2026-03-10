@@ -7,7 +7,7 @@ import java.util.Arrays;
  * <p>
  * Type byte 0x00: uncompressed — raw bytes follow the type byte.
  * Type byte 0x02: compressed LZ77 bitstream with prefix-tree coded lengths
- * and dynamically-sized offsets.
+ * and prefix-tree coded offsets (reverse-engineered from filer.exe).
  */
 public final class CybikoDecompressor {
 
@@ -52,7 +52,7 @@ public final class CybikoDecompressor {
             } else {
                 // Back-reference
                 int length = decodeLength(bits);
-                int offset = decodeOffset(bits, pos, length);
+                int offset = decodeOffset(bits);
                 int source = pos - offset - length;
                 int actual = Math.min(length, uncompressedSize - pos);
                 for (int i = 0; i < actual; i++) {
@@ -66,44 +66,123 @@ public final class CybikoDecompressor {
     }
 
     /**
-     * Decode match length using prefix tree:
+     * Decode match length (reverse-engineered from filer.exe 0x402bc9-0x402db4).
      * <pre>
-     * 0 → 2
-     * 1,0 → 3
-     * 1,1,0 → 4
-     * 1,1,1,0,0 → 5
-     * 1,1,1,0,1 → 6
-     * 1,1,1,1,0,0 → 7
-     * 1,1,1,1,0,1 → 8
-     * 1,1,1,1,1 → read 8 bits MSB + 1
+     * readBits(2):
+     *   00 → 2
+     *   01 → 3
+     *   10 → readBit() + 4                          (4-5)
+     *   11 → readBits(2):
+     *     00 → 6
+     *     01 → readBit() + 8                         (8-9)
+     *     10 → readBit(): 0→7, 1→readBit()+10        (7,10-11)
+     *     11 → readBits(3) jump table:
+     *       0→12, 1→13, 2→readBits(2)+20, 3→readBit()+16,
+     *       4→readBits(3)+24, 5→14,
+     *       6→readBit(): 0→readBits(5)+32, 1→readBit()+18,
+     *       7→readBit(): 0→15, 1→readBit(): 0→readBits(6)+64,
+     *         1→readBit(): 0→readBits(7)+128, 1→256
      * </pre>
      */
     private static int decodeLength(BitReader bits) {
-        if (bits.readBit() == 0) return 2;
-        if (bits.readBit() == 0) return 3;
-        if (bits.readBit() == 0) return 4;
-        if (bits.readBit() == 0) {
-            return 5 + bits.readBit();
+        int prefix = bits.readBitsMsb(2);
+        return switch (prefix) {
+            case 0 -> 2;
+            case 1 -> 3;
+            case 2 -> 4 + bits.readBit();
+            case 3 -> {
+                int sub = bits.readBitsMsb(2);
+                yield switch (sub) {
+                    case 0 -> 6;
+                    case 1 -> 8 + bits.readBit();
+                    case 2 -> bits.readBit() == 0 ? 7 : 10 + bits.readBit();
+                    case 3 -> decodeLengthLevel3(bits);
+                    default -> throw new IllegalStateException();
+                };
+            }
+            default -> throw new IllegalStateException();
+        };
+    }
+
+    private static int decodeLengthLevel3(BitReader bits) {
+        int idx = bits.readBitsMsb(3);
+        if (idx <= 6) {
+            return switch (idx) {
+                case 0 -> 12;
+                case 1 -> 13;
+                case 2 -> 20 + bits.readBitsMsb(2);
+                case 3 -> 16 + bits.readBit();
+                case 4 -> 24 + bits.readBitsMsb(3);
+                case 5 -> 14;
+                case 6 -> bits.readBit() == 0
+                        ? 32 + bits.readBitsMsb(5)
+                        : 18 + bits.readBit();
+                default -> throw new IllegalStateException();
+            };
         }
-        if (bits.readBit() == 0) {
-            return 7 + bits.readBit();
-        }
-        return bits.readBitsMsb(8) + 1;
+        // idx > 6 (case 7)
+        if (bits.readBit() == 0) return 15;
+        if (bits.readBit() == 0) return 64 + bits.readBitsMsb(6);
+        if (bits.readBit() == 0) return 128 + bits.readBitsMsb(7);
+        return 256;
     }
 
     /**
-     * Decode match offset using dynamic bit width based on current position.
-     * The number of bits read equals {@code Integer.SIZE - Integer.numberOfLeadingZeros(pos - length)}
-     * (i.e., the bit length of the maximum possible back-reference distance).
-     * Bits are accumulated MSB-first.
+     * Decode match offset (reverse-engineered from filer.exe 0x402db4-0x402f8b).
+     * <pre>
+     * readBits(3):
+     *   0 → readBits(10) + 1024       (1024-2047)
+     *   1 → readBits(9) + 512         (512-1023)
+     *   2 → readBits(8) + 256         (256-511)
+     *   3 → readBits(6) + 64          (64-127)
+     *   4 → readBits(7) + 128         (128-255)
+     *   5 → readBit(): 0→readBits(11)+2048, 1→readBits(12)+4096
+     *   6 → readBit(): 0→readBits(5)+32, 1→readBits(4)+16
+     *   7 → readBits(2):
+     *     0 → readBit()               (0-1)
+     *     1 → readBits(2) + 6         (6-9)
+     *     2 → readBit(): 0→readBit()+4, 1→2       (2,4-5)
+     *     3 → readBits(2):
+     *       0→readBit()+12, 1→readBit()+14, 2→3, 3→readBit()+10
+     * </pre>
      */
-    private static int decodeOffset(BitReader bits, int pos, int length) {
-        int maxBack = pos - length;
-        if (maxBack <= 0) {
-            return 0;
-        }
-        int offsetBits = 32 - Integer.numberOfLeadingZeros(maxBack);
-        return bits.readBitsMsb(offsetBits);
+    private static int decodeOffset(BitReader bits) {
+        int prefix = bits.readBitsMsb(3);
+        return switch (prefix) {
+            case 0 -> 1024 + bits.readBitsMsb(10);
+            case 1 -> 512 + bits.readBitsMsb(9);
+            case 2 -> 256 + bits.readBitsMsb(8);
+            case 3 -> 64 + bits.readBitsMsb(6);
+            case 4 -> 128 + bits.readBitsMsb(7);
+            case 5 -> bits.readBit() == 0
+                    ? 2048 + bits.readBitsMsb(11)
+                    : 4096 + bits.readBitsMsb(12);
+            case 6 -> bits.readBit() == 0
+                    ? 32 + bits.readBitsMsb(5)
+                    : 16 + bits.readBitsMsb(4);
+            case 7 -> {
+                int sub = bits.readBitsMsb(2);
+                yield switch (sub) {
+                    case 0 -> bits.readBit();
+                    case 1 -> 6 + bits.readBitsMsb(2);
+                    case 2 -> bits.readBit() == 0
+                            ? 4 + bits.readBit()
+                            : 2;
+                    case 3 -> {
+                        int sub2 = bits.readBitsMsb(2);
+                        yield switch (sub2) {
+                            case 0 -> 12 + bits.readBit();
+                            case 1 -> 14 + bits.readBit();
+                            case 2 -> 3;
+                            case 3 -> 10 + bits.readBit();
+                            default -> throw new IllegalStateException();
+                        };
+                    }
+                    default -> throw new IllegalStateException();
+                };
+            }
+            default -> throw new IllegalStateException();
+        };
     }
 
     /**
