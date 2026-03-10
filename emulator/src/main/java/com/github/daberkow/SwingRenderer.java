@@ -19,19 +19,25 @@ public class SwingRenderer implements FrameBufferRenderer {
     private final MachineConfig config;
     private AddressBus bus;
 
-    // Fn+letter combo state for number key input (XT only).
-    private static final int FN_FIRST_DELAY = 4;
-    private static final int FN_NEXT_DELAY = 3;
-    private static final int FN_RELEASE_DELAY = 10;
-    private boolean fnHeld = false;
-    private int fnHeldCount = 0;
-    private int fnReleaseCountdown = 0;
-
-    private static final int MAX_PENDING_LETTERS = 8;
-    private final int[] pendingCols = new int[MAX_PENDING_LETTERS];
-    private final int[] pendingBits = new int[MAX_PENDING_LETTERS];
-    private final int[] pendingDelays = new int[MAX_PENDING_LETTERS];
-    private int pendingCount = 0;
+    // Fn+letter combo for XT number keys.
+    // EDT queues digits; render() processes ONE at a time through the full
+    // Fn-then-letter sequence on the emulation thread (no DMA race).
+    private static final int FN_PRESS_DELAY = 8;   // Frames Fn must be held alone before first letter
+    private static final int FN_BETWEEN_DELAY = 3; // Frames between consecutive letters (Fn stays held)
+    private static final int FN_RELEASE_HOLD = 6;  // Frames to hold Fn after last letter released
+    private static final int NUM_MIN_HOLD = 6;     // Minimum frames to hold letter in matrix
+    private static final int[] NUM_COLS = {9, 3, 3, 3, 2, 2, 1, 1, 0, 0};
+    private static final int[] NUM_BITS = {0x0010, 0x0002, 0x0040, 0x0080, 0x2000, 0x4000, 0x0020, 0x0040, 0x1000, 0x2000};
+    // EDT queue: digits waiting to be typed (circular buffer)
+    private static final int NUM_QUEUE_SIZE = 16;
+    private final int[] numQueue = new int[NUM_QUEUE_SIZE];
+    private int numQueueHead = 0, numQueueTail = 0;
+    // Current digit being processed (-1 = idle)
+    private int currentDigit = -1;
+    private int numHoldLeft = 0;     // hold countdown for current letter
+    private boolean fnActive = false;
+    private int fnDelay = 0;
+    private int fnReleaseDelay = 0;
 
     // Minimum key hold time
     private static final int MIN_HOLD_FRAMES = 3;
@@ -379,51 +385,78 @@ public class SwingRenderer implements FrameBufferRenderer {
         }
     }
 
-    /** Fn + letter combo for XT number keys. */
-    private void setFnLetter(int letterCol, int letterBit, boolean pressed) {
-        if (pressed) {
-            fnHeldCount++;
-            fnReleaseCountdown = 0;
-            if (!fnHeld) {
+    /** Process Fn+letter state machine on emulation thread.
+     *  Types one digit at a time: Fn press → delay → letter press → hold → release.
+     *  Fn stays held between consecutive digits (shorter delay). */
+    private void processFnLetters() {
+        boolean hasQueued = numQueueHead != numQueueTail;
+
+        // State: idle, no queued digits → release Fn if active
+        if (currentDigit < 0 && !hasQueued) {
+            if (fnActive) {
+                fnReleaseDelay++;
+                if (fnReleaseDelay >= FN_RELEASE_HOLD) {
+                    bus.setKeyState(7, 0x8000, false);
+                    fnActive = false;
+                    fnReleaseDelay = 0;
+                }
+            }
+            return;
+        }
+        fnReleaseDelay = 0;
+
+        // Start next digit from queue if idle
+        if (currentDigit < 0 && hasQueued) {
+            currentDigit = numQueue[numQueueHead];
+            numQueueHead = (numQueueHead + 1) % NUM_QUEUE_SIZE;
+            if (!fnActive) {
+                // First digit: press Fn and wait
                 bus.setKeyState(7, 0x8000, true);
-                fnHeld = true;
-                queuePendingLetter(letterCol, letterBit, FN_FIRST_DELAY);
+                fnActive = true;
+                fnDelay = FN_PRESS_DELAY;
             } else {
-                queuePendingLetter(letterCol, letterBit, FN_NEXT_DELAY);
+                // Fn already held from previous digit: shorter delay
+                fnDelay = FN_BETWEEN_DELAY;
             }
-        } else {
-            bus.setKeyState(letterCol, letterBit, false);
-            removePendingLetter(letterCol, letterBit);
-            fnHeldCount = Math.max(0, fnHeldCount - 1);
-            if (fnHeldCount == 0 && fnHeld) {
-                fnReleaseCountdown = FN_RELEASE_DELAY;
-            }
+            numHoldLeft = -1; // letter not yet pressed
+        }
+
+        // Fn delay countdown
+        if (fnDelay > 0) {
+            fnDelay--;
+            return;
+        }
+
+        // Press letter if not yet pressed
+        if (currentDigit >= 0 && numHoldLeft < 0) {
+            bus.setKeyState(NUM_COLS[currentDigit], NUM_BITS[currentDigit], true);
+            numHoldLeft = NUM_MIN_HOLD;
+            return;
+        }
+
+        // Hold countdown
+        if (numHoldLeft > 0) {
+            numHoldLeft--;
+            return;
+        }
+
+        // Release letter, move to next digit
+        if (currentDigit >= 0 && numHoldLeft == 0) {
+            bus.setKeyState(NUM_COLS[currentDigit], NUM_BITS[currentDigit], false);
+            currentDigit = -1;
         }
     }
 
-    private void queuePendingLetter(int col, int bit, int delay) {
-        for (int i = 0; i < pendingCount; i++) {
-            if (pendingCols[i] == col && pendingBits[i] == bit) {
-                pendingDelays[i] = delay;
-                return;
-            }
-        }
-        if (pendingCount < MAX_PENDING_LETTERS) {
-            pendingCols[pendingCount] = col;
-            pendingBits[pendingCount] = bit;
-            pendingDelays[pendingCount] = delay;
-            pendingCount++;
-        }
-    }
-
-    private void removePendingLetter(int col, int bit) {
-        for (int i = 0; i < pendingCount; i++) {
-            if (pendingCols[i] == col && pendingBits[i] == bit) {
-                pendingCount--;
-                if (i < pendingCount) {
-                    pendingCols[i] = pendingCols[pendingCount];
-                    pendingBits[i] = pendingBits[pendingCount];
-                    pendingDelays[i] = pendingDelays[pendingCount];
+    /** Fn + letter combo for XT number keys. EDT enqueues digit;
+     *  render() types them one at a time on the emulation thread. */
+    private void setFnLetter(int letterCol, int letterBit, boolean pressed) {
+        if (!pressed) return; // only queue on key down; release is automatic after hold
+        for (int i = 0; i < 10; i++) {
+            if (NUM_COLS[i] == letterCol && NUM_BITS[i] == letterBit) {
+                int next = (numQueueTail + 1) % NUM_QUEUE_SIZE;
+                if (next != numQueueHead) { // not full
+                    numQueue[numQueueTail] = i;
+                    numQueueTail = next;
                 }
                 return;
             }
@@ -443,27 +476,9 @@ public class SwingRenderer implements FrameBufferRenderer {
                 }
             }
 
-            // Process queued Fn+letter presses (XT only)
-            for (int i = 0; i < pendingCount; i++) {
-                if (--pendingDelays[i] <= 0) {
-                    bus.setKeyState(pendingCols[i], pendingBits[i], true);
-                    pendingCount--;
-                    if (i < pendingCount) {
-                        pendingCols[i] = pendingCols[pendingCount];
-                        pendingBits[i] = pendingBits[pendingCount];
-                        pendingDelays[i] = pendingDelays[pendingCount];
-                    }
-                    i--;
-                }
-            }
-
-            // Delayed Fn release (XT only)
-            if (fnReleaseCountdown > 0) {
-                fnReleaseCountdown--;
-                if (fnReleaseCountdown == 0 && fnHeld) {
-                    bus.setKeyState(7, 0x8000, false);
-                    fnHeld = false;
-                }
+            // Fn+letter state machine (XT only) — all on emulation thread
+            if (config.type == MachineConfig.MachineType.XT) {
+                processFnLetters();
             }
         }
 
