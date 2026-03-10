@@ -3,6 +3,8 @@ package com.github.daberkow.cybiko.manager;
 import atlantafx.base.theme.PrimerDark;
 import atlantafx.base.theme.PrimerLight;
 import com.github.daberkow.cybiko.manager.cfs.*;
+import com.github.daberkow.cybiko.manager.io.EmulatorConfig;
+import com.github.daberkow.cybiko.manager.io.EmulatorLauncher;
 import com.github.daberkow.cybiko.manager.io.LibraryConfig;
 import com.github.daberkow.cybiko.manager.io.LibraryScanner;
 import com.github.daberkow.cybiko.manager.io.RecentFiles;
@@ -24,6 +26,7 @@ import javafx.stage.Stage;
 import javafx.util.Callback;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -59,6 +62,9 @@ public class MainWindow extends StackPane {
     // Recent files
     private List<Path> recentPaths = new ArrayList<>();
     private Menu recentMenu;
+
+    // Emulator
+    private EmulatorConfig emulatorConfig;
 
     // Theme
     private final String initialTheme;
@@ -111,6 +117,7 @@ public class MainWindow extends StackPane {
         detail.setOnAddToNvram(this::addLibraryItemToNvram);
         detail.setOnRemoveFromNvram(this::removeNvramItem);
         detail.setOnViewHex(this::viewHex);
+        detail.setOnLaunchEmulator(this::launchEmulator);
 
         // Load library config
         libraryFolders = LibraryConfig.load();
@@ -119,6 +126,9 @@ public class MainWindow extends StackPane {
         // Load recent files
         recentPaths = RecentFiles.load();
         rebuildRecentMenu();
+
+        // Load emulator config
+        emulatorConfig = EmulatorConfig.load();
     }
 
     private MenuBar createMenuBar() {
@@ -219,12 +229,20 @@ public class MainWindow extends StackPane {
         MenuItem exportCsvItem = new MenuItem("Export as CSV...");
         exportCsvItem.setOnAction(e -> exportCsv());
 
+        MenuItem launchItem = new MenuItem("Launch Emulator");
+        launchItem.setOnAction(e -> launchEmulator());
+
+        MenuItem settingsItem = new MenuItem("Emulator Settings...");
+        settingsItem.setOnAction(e -> showEmulatorSettings());
+
         nvramMenu.getItems().addAll(
             addFileItem, removeSelectedItem,
             new SeparatorMenuItem(),
             validateItem, propertiesItem,
             new SeparatorMenuItem(),
-            exportCsvItem
+            exportCsvItem,
+            new SeparatorMenuItem(),
+            launchItem, settingsItem
         );
 
         // --- Help menu ---
@@ -790,6 +808,158 @@ public class MainWindow extends StackPane {
         }
 
         return report.toString();
+    }
+
+    // ---- Emulator launch ----
+
+    private void showEmulatorSettings() {
+        EmulatorSettingsDialog dialog = new EmulatorSettingsDialog(emulatorConfig, stage);
+        Optional<EmulatorConfig> result = showDialog(dialog);
+        result.ifPresent(cfg -> {
+            emulatorConfig = cfg;
+            try {
+                EmulatorConfig.save(cfg);
+            } catch (IOException ex) {
+                showError("Failed to save settings", ex.getMessage());
+            }
+        });
+    }
+
+    private void launchEmulator() {
+        if (currentImage == null) {
+            showError("No NVRAM Selected", "Please select an NVRAM image first.");
+            return;
+        }
+        if (currentPath == null || currentImage.isModified()) {
+            showError("Unsaved NVRAM",
+                    "Please save the NVRAM image before launching the emulator.");
+            return;
+        }
+
+        FlashGeometry geometry = currentImage.geometry();
+        String machine = EmulatorLauncher.machineType(geometry);
+
+        // Resolve ROMs
+        Path bootRom = resolveRom(machine, true);
+        if (bootRom == null) return;
+        Path flashRom = resolveRom(machine, false);
+        if (flashRom == null) return;
+
+        // Resolve emulator JAR
+        Path emulatorJar = resolveEmulatorJar();
+        if (emulatorJar == null) return;
+
+        // Save resolved paths
+        setRomPath(machine, true, bootRom.toString());
+        setRomPath(machine, false, flashRom.toString());
+        emulatorConfig.setEmulatorJarPath(emulatorJar.toString());
+        try { EmulatorConfig.save(emulatorConfig); } catch (IOException ignored) {}
+
+        // Build command line and launch
+        List<String> args = EmulatorLauncher.buildCommandLine(
+                bootRom, flashRom, currentPath, geometry, emulatorConfig);
+        try {
+            EmulatorLauncher.launch(emulatorJar, args);
+        } catch (IOException ex) {
+            showError("Failed to launch emulator", ex.getMessage());
+        }
+    }
+
+    private Path resolveRom(String machineType, boolean isBootRom) {
+        String savedPath = isBootRom ? getBootRomPath(machineType) : getFlashRomPath(machineType);
+        if (!savedPath.isEmpty()) {
+            Path p = Path.of(savedPath);
+            if (Files.isRegularFile(p)) return p;
+        }
+
+        String filename = isBootRom
+                ? EmulatorLauncher.defaultBootRomName(machineType)
+                : EmulatorLauncher.defaultFlashRomName(machineType);
+        List<Path> searchDirs = List.of(
+                Path.of("."),
+                Path.of("roms"),
+                Path.of("..", "roms")
+        );
+        Path found = EmulatorLauncher.searchRom(filename, searchDirs);
+        if (found != null) return found;
+
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Locate " + (isBootRom ? "Boot ROM" : "Flash ROM")
+                + " for " + machineType.toUpperCase() + " (" + filename + ")");
+        chooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("ROM Files", "*.bin"));
+        File file = chooser.showOpenDialog(stage);
+        return file != null ? file.toPath() : null;
+    }
+
+    private Path resolveEmulatorJar() {
+        String saved = emulatorConfig.getEmulatorJarPath();
+        if (!saved.isEmpty()) {
+            Path p = Path.of(saved);
+            if (Files.isRegularFile(p)) return p;
+        }
+
+        List<Path> searchDirs = List.of(
+                Path.of("."),
+                Path.of("..", "emulator", "build", "libs")
+        );
+        Path found = EmulatorLauncher.searchEmulatorJar(searchDirs);
+        if (found != null) return found;
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("Emulator Not Found");
+        alert.setHeaderText("Could not find the emulator JAR.");
+        Hyperlink link = new Hyperlink(EmulatorLauncher.RELEASES_URL);
+        link.setOnAction(ev -> {
+            try {
+                java.awt.Desktop.getDesktop().browse(
+                        java.net.URI.create(EmulatorLauncher.RELEASES_URL));
+            } catch (Exception ignored) {}
+        });
+        javafx.scene.layout.VBox vbox = new javafx.scene.layout.VBox(8,
+                new Label("Download from:"), link,
+                new Label("Or click OK to browse for it."));
+        alert.getDialogPane().setContent(vbox);
+        showDialog(alert);
+
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Locate Emulator JAR");
+        chooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("JAR Files", "*.jar"));
+        File file = chooser.showOpenDialog(stage);
+        return file != null ? file.toPath() : null;
+    }
+
+    private String getBootRomPath(String machine) {
+        return switch (machine) {
+            case "v1" -> emulatorConfig.getV1BootRom();
+            case "v2" -> emulatorConfig.getV2BootRom();
+            default -> emulatorConfig.getXtBootRom();
+        };
+    }
+
+    private String getFlashRomPath(String machine) {
+        return switch (machine) {
+            case "v1" -> emulatorConfig.getV1FlashRom();
+            case "v2" -> emulatorConfig.getV2FlashRom();
+            default -> emulatorConfig.getXtFlashRom();
+        };
+    }
+
+    private void setRomPath(String machine, boolean isBootRom, String path) {
+        if (isBootRom) {
+            switch (machine) {
+                case "v1" -> emulatorConfig.setV1BootRom(path);
+                case "v2" -> emulatorConfig.setV2BootRom(path);
+                default -> emulatorConfig.setXtBootRom(path);
+            }
+        } else {
+            switch (machine) {
+                case "v1" -> emulatorConfig.setV1FlashRom(path);
+                case "v2" -> emulatorConfig.setV2FlashRom(path);
+                default -> emulatorConfig.setXtFlashRom(path);
+            }
+        }
     }
 
     private void showProperties() {

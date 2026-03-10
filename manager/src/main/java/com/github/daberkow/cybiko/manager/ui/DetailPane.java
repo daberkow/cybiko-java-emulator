@@ -40,6 +40,7 @@ public class DetailPane extends VBox {
     private final Button addToNvramBtn = new Button("Add to NVRAM");
     private final Button removeFromNvramBtn = new Button("Remove from NVRAM");
     private final Button viewHexBtn = new Button("View Hex");
+    private final Button launchEmulatorBtn = new Button("Launch Emulator");
     private final HBox actionBox = new HBox(8);
 
     private boolean nvramAvailable = false;
@@ -48,6 +49,7 @@ public class DetailPane extends VBox {
     private Consumer<LibraryItem> onAddToNvram;
     private Consumer<NvramItem> onRemoveFromNvram;
     private Consumer<ContentItem> onViewHex;
+    private Runnable onLaunchEmulator;
 
     public DetailPane() {
         setPrefWidth(250);
@@ -100,6 +102,11 @@ public class DetailPane extends VBox {
             if (currentItem != null && onViewHex != null) {
                 onViewHex.accept(currentItem);
             }
+        });
+
+        launchEmulatorBtn.getStyleClass().add("action-button");
+        launchEmulatorBtn.setOnAction(e -> {
+            if (onLaunchEmulator != null) onLaunchEmulator.run();
         });
 
         actionBox.setPadding(new Insets(8, 0, 0, 0));
@@ -156,7 +163,7 @@ public class DetailPane extends VBox {
             fileIdRow.setVisible(true);
             fileIdRow.setManaged(true);
 
-            actionBox.getChildren().setAll(removeFromNvramBtn, viewHexBtn);
+            actionBox.getChildren().setAll(launchEmulatorBtn, removeFromNvramBtn, viewHexBtn);
         } else if (item instanceof LibraryItem li) {
             statusValue.setText(li.inNvram() ? "In NVRAM" : "Not in NVRAM");
             blocksRow.setVisible(false);
@@ -202,6 +209,10 @@ public class DetailPane extends VBox {
 
     public void setOnViewHex(Consumer<ContentItem> callback) {
         this.onViewHex = callback;
+    }
+
+    public void setOnLaunchEmulator(Runnable callback) {
+        this.onLaunchEmulator = callback;
     }
 
     private VBox makeRow(String label, Label value) {
