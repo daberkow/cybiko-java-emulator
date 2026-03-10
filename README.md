@@ -31,9 +31,23 @@ java -jar Cybiko-Emulator-*.jar --machine v1 cyrom112.bin flash_v1246.bin
 
 > A full distribution ZIP with launch scripts is also available on the releases page if you prefer that.
 
-### 3. Load Apps
+### 3. Load Apps (the easy way — NVRAM Manager)
 
-Download `.app` files from the [Cybiko Archive](https://archive.org/details/cybiko) and load them with `--app`:
+Don't want to deal with command-line flags? The **NVRAM Manager** is a visual app that lets you manage your Cybiko's storage and launch the emulator with a couple of clicks.
+
+1. Download `Cybiko-NVRAM-Manager-*.jar` from the [Releases page](https://github.com/daberkow/cybiko-java-emulator/releases) and put it in the same folder as the emulator JAR and your ROMs
+2. Run it: `java -jar Cybiko-NVRAM-Manager-*.jar`
+3. Go to **File > New Xtreme Image** (or Classic V1) to create a fresh NVRAM
+4. Save it somewhere with **File > Save As**
+5. Go to **Library > Add Folder** and point it at a folder of `.app` files from the [Cybiko Archive](https://archive.org/details/cybiko)
+6. Browse your apps in the library, select one, and click **Add to NVRAM** — repeat for as many as you want
+7. Right-click your NVRAM in the sidebar and hit **Launch Emulator** — it finds the ROMs and emulator JAR automatically
+
+Your apps, clock, and settings are all saved in the NVRAM file between sessions.
+
+### 3b. Load Apps (command line)
+
+If you prefer the terminal, you can load `.app` files directly:
 
 ```bash
 # Load an app and save to persistent NVRAM
@@ -133,6 +147,14 @@ cybiko-java/
 A JavaFX desktop application for managing Cybiko NVRAM/flash images without running the emulator. Browse, add, remove, and inspect files on any Cybiko flash image.
 
 ### Quick Start
+
+Grab `Cybiko-NVRAM-Manager-*.jar` from the [Releases page](https://github.com/daberkow/cybiko-java-emulator/releases) and run it:
+
+```bash
+java -jar Cybiko-NVRAM-Manager-*.jar
+```
+
+Or build from source:
 
 ```bash
 ./gradlew :manager:build
