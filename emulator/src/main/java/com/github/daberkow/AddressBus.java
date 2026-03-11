@@ -110,6 +110,13 @@ public class AddressBus {
     private static final int SCI2_TXI_DELAY = 32; // Cycles between TXI2 fires (~byte transmission time)
     private int sci2PendingIndicator = -1; // Deferred frame indicator (0x32/0xC8) from TX DTC completion
 
+    // Serial port bridge (V1/V2 SCI2 → PTY)
+    private SerialPort serialPort;       // PTY serial bridge (null if not enabled)
+    private int sci2Rdr = 0;             // SCI2 receive data register (from serial port, separate from sci0Rdr)
+    private boolean sci2Rdrf = false;    // SCI2 receive data register full (from serial port)
+    private final java.util.List<Integer> serialTxLog = new java.util.ArrayList<>();
+    private final java.util.List<Integer> serialRxLog = new java.util.ArrayList<>();
+
     // Async radio frame delivery: check every N cycles if CyOS is idle and
     // frames are waiting. 512 cycles ≈ 28µs at 18.43MHz, responsive enough
     // for frame delivery without significant per-cycle overhead.
@@ -209,6 +216,10 @@ public class AddressBus {
         if (config.type == MachineConfig.MachineType.V2) {
             radio.setV2Mode(true);
         }
+    }
+
+    public void setSerialPort(SerialPort port) {
+        this.serialPort = port;
     }
 
     /**
@@ -615,6 +626,28 @@ public class AddressBus {
         }
     }
 
+    /**
+     * Tick the serial port bridge. Checks for incoming bytes from the PTY
+     * and delivers them to SCI2 RDR with RXI2 interrupt.
+     * Only active on V1/V2 (radioSciChannel != 2).
+     */
+    public void tickSerial() {
+        if (serialPort == null || radioSciChannel == 2) return;
+
+        // RX: deliver bytes from serial port to SCI2 RDR
+        if (!sci2Rdrf && serialPort.hasData()) {
+            sci2Rdr = serialPort.read();
+            sci2Rdrf = true;
+            serialRxLog.add(sci2Rdr);
+            if ((sci2Scr & 0x40) != 0 && cpu != null) {
+                cpu.requestInterrupt(89); // RXI2
+            }
+        }
+    }
+
+    public java.util.List<Integer> getSerialTxLog() { return serialTxLog; }
+    public java.util.List<Integer> getSerialRxLog() { return serialRxLog; }
+
     // Legacy setters (delegate to indexed version)
     public void setTimer16_0(H8STimer16 t) { timer16[0] = t; }
     public void setTimer16_1(H8STimer16 t) { timer16[1] = t; }
@@ -938,6 +971,15 @@ public class AddressBus {
             }
             return 0;
         }
+        // SCI2 RDR — serial port (V1/V2)
+        if (address == 0xFFFF8D && serialPort != null && radioSciChannel != 2 && sci2Rdrf) {
+            if (sci2RegLog.size() < 500) {
+                int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
+                sci2RegLog.add(String.format("R RDR=0x%02X PC=0x%06X", sci2Rdr, pc));
+            }
+            sci2Rdrf = false;
+            return sci2Rdr;
+        }
         if (address == 0xFFFF8D && radio != null && radioSciChannel == 2) { // SCI2 RDR
             if (sci2RegLog.size() < 500) {
                 int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
@@ -950,6 +992,7 @@ public class AddressBus {
             int ssr = SSR_TEND; // TEND always set for our purposes
             if (sci2Tdre) ssr |= SSR_TDRE;
             if (radio != null && radioSciChannel == 2 && sci0Rdrf) ssr |= SSR_RDRF;
+            if (serialPort != null && radioSciChannel != 2 && sci2Rdrf) ssr |= SSR_RDRF;
             if (sci2RegLog.size() < 500) {
                 int pc = (cpu != null) ? cpu.getLastStartPC() : -1;
                 if (pc != sci2SsrLastLogPc) {
@@ -1119,6 +1162,17 @@ public class AddressBus {
                 }
                 if (channel == 2) {
                     sci2TdrLog.add(value & 0xFF);
+                }
+                // Serial port bridge (V1/V2): forward SCI2 TDR to PTY
+                if (channel == 2 && serialPort != null && radioSciChannel != 2) {
+                    try {
+                        serialPort.write(value & 0xFF);
+                        serialTxLog.add(value & 0xFF);
+                    } catch (java.io.IOException e) {
+                        Log.log(Log.Category.SERIAL, "[SERIAL] TX error: %s", e.getMessage());
+                    }
+                    sci2Tdre = false;
+                    sci2TxiDelay = SCI2_TXI_DELAY;
                 }
                 if (channel == radioSciChannel && radio != null) {
                     if (channel == 2) {
