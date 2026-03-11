@@ -193,8 +193,9 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 - `FrameBufferRenderer` / `SwingRenderer` / `ConsoleRenderer` - Display
 - `SwingRenderer` - Swing GUI with keyboard input. Bulk setRGB for rendering. Takes
   MachineConfig to select XT (15-col, Fn+letter numbers) or V1 (9-col, dedicated numbers)
-  keyboard layout. Queue-based Fn+letter injection for XT number keys. Minimum key hold
-  time (3 frames) for all keys.
+  keyboard layout. Queue-based Fn+letter injection for XT number keys. Lazy Shift:
+  PC Shift sets flag but doesn't enter Cybiko matrix until paired with a letter key,
+  preventing Shift+1→^ when user wants !. Minimum key hold time (3 frames) for all keys.
 - `RadioCoProcessor` - AVR radio co-processor stub (AT90S2313). Emulates SCI UART
   protocol with the H8S CPU. Variable-length command protocol: 0x01=3 bytes (init,
   channel, config), 0x30/0xCF=2 bytes (poll, scan), all others=2 bytes. Two call paths:
@@ -381,12 +382,9 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   instead of R0L). Caused BCD-to-binary conversion to lose tens digit (bug #16)
 
 ## Known Issues
-- **Fn+number keys intermittent**: Number keys (Fn+letter combos) work ~80-90% of the
-  time but occasionally produce the letter instead. SwingRenderer uses queue-based
-  delayed Fn+letter injection (Fn pressed first, letter delayed 3-4 frames) but fast
-  typing can still race with CyOS's DMA keyboard scan. Root cause is thread
-  synchronization: Swing EDT modifies key matrix while emulation thread reads it.
-  Performance is not the bottleneck (~4ms/frame, 24% of budget).
+- **Missing XT punctuation keys**: Physical Cybiko keys `,` `(` `)` have unknown
+  matrix positions (probing cols 9-13 found nothing). `!` was found at col 9, bit
+  0x0004. The Fn+letter symbol layer (@, &, $, %, *, +, etc.) is partially mapped.
 - **V2 CyOS stuck at Cybiko logo**: V2 boots through SPI flash loading, reaches the
   animated Cybiko logo (VRAM hash C0DBEF72, same as V1/XT) but never progresses to
   desktop. I2C RTC communication now works (bug #10 fix), but the desktop app never

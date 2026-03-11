@@ -39,6 +39,47 @@ public class SwingRenderer implements FrameBufferRenderer {
     private int fnDelay = 0;
     private int fnReleaseDelay = 0;
 
+    // Lazy Shift: PC Shift key sets this flag but does NOT immediately put Shift
+    // into the Cybiko keyboard matrix.  Shift is added to the matrix only when a
+    // key that needs CyOS-level shifting (letters, ;, etc.) is pressed alongside it.
+    // Keys that map to dedicated unshifted Cybiko keys (like Shift+1 → !) bypass
+    // Shift entirely, preventing CyOS from seeing Shift+! = ^.
+    private boolean pcShiftHeld = false;
+
+    // Keyboard probe mode: F12 cycles through unknown column:bit positions.
+    // Each press activates the next position for PROBE_HOLD frames.
+    private static final int PROBE_HOLD = 10;
+    private int probeIndex = -1;
+    private int probeHoldLeft = 0;
+    private int probeCol = -1, probeBit = 0;
+    // Candidate positions to test (columns 9-13, unused bits)
+    private static final int[][] PROBE_POSITIONS = {
+        // col 9 unused bits
+        {9, 0x0004}, {9, 0x0020}, {9, 0x0040}, {9, 0x0080},
+        {9, 0x0100}, {9, 0x0200}, {9, 0x0400}, {9, 0x0800},
+        {9, 0x1000}, {9, 0x2000}, {9, 0x4000}, {9, 0x8000},
+        // col 10
+        {10, 0x0001}, {10, 0x0002}, {10, 0x0004}, {10, 0x0008},
+        {10, 0x0010}, {10, 0x0020}, {10, 0x0040}, {10, 0x0080},
+        {10, 0x0100}, {10, 0x0200}, {10, 0x0400}, {10, 0x0800},
+        {10, 0x1000}, {10, 0x2000}, {10, 0x4000}, {10, 0x8000},
+        // col 11
+        {11, 0x0001}, {11, 0x0002}, {11, 0x0004}, {11, 0x0008},
+        {11, 0x0010}, {11, 0x0020}, {11, 0x0040}, {11, 0x0080},
+        {11, 0x0100}, {11, 0x0200}, {11, 0x0400}, {11, 0x0800},
+        {11, 0x1000}, {11, 0x2000}, {11, 0x4000}, {11, 0x8000},
+        // col 12
+        {12, 0x0001}, {12, 0x0002}, {12, 0x0004}, {12, 0x0008},
+        {12, 0x0010}, {12, 0x0020}, {12, 0x0040}, {12, 0x0080},
+        {12, 0x0100}, {12, 0x0200}, {12, 0x0400}, {12, 0x0800},
+        {12, 0x1000}, {12, 0x2000}, {12, 0x4000}, {12, 0x8000},
+        // col 13 unused bits
+        {13, 0x0002}, {13, 0x0004}, {13, 0x0008}, {13, 0x0010},
+        {13, 0x0020}, {13, 0x0040}, {13, 0x0080},
+        {13, 0x0100}, {13, 0x0200}, {13, 0x0400}, {13, 0x0800},
+        {13, 0x1000}, {13, 0x2000}, {13, 0x4000}, {13, 0x8000},
+    };
+
     // Minimum key hold time
     private static final int MIN_HOLD_FRAMES = 3;
     private static final int MAX_HELD_KEYS = 16;
@@ -84,8 +125,8 @@ public class SwingRenderer implements FrameBufferRenderer {
 
         frame.addKeyListener(new KeyListener() {
             @Override public void keyTyped(KeyEvent e) {}
-            @Override public void keyPressed(KeyEvent e) { handleKey(e.getKeyCode(), true); }
-            @Override public void keyReleased(KeyEvent e) { handleKey(e.getKeyCode(), false); }
+            @Override public void keyPressed(KeyEvent e) { handleKey(e.getKeyCode(), true, e.isShiftDown()); }
+            @Override public void keyReleased(KeyEvent e) { handleKey(e.getKeyCode(), false, e.isShiftDown()); }
         });
         frame.setFocusable(true);
         frame.requestFocus();
@@ -144,11 +185,11 @@ public class SwingRenderer implements FrameBufferRenderer {
         startStopItem.setText(emulatorRunning ? "Stop" : "Start");
     }
 
-    private void handleKey(int keyCode, boolean pressed) {
+    private void handleKey(int keyCode, boolean pressed, boolean shiftDown) {
         if (bus == null) return;
 
         if (config.type == MachineConfig.MachineType.XT) {
-            handleKeyXT(keyCode, pressed);
+            handleKeyXT(keyCode, pressed, shiftDown);
         } else {
             handleKeyV1(keyCode, pressed);
         }
@@ -157,19 +198,41 @@ public class SwingRenderer implements FrameBufferRenderer {
     // ========================================================================
     // Cybiko Xtreme keyboard (15 columns x 16-bit, Fn+letter for numbers)
     // ========================================================================
-    private void handleKeyXT(int keyCode, boolean pressed) {
-        // Number keys: Fn + letter combos
+    private void handleKeyXT(int keyCode, boolean pressed, boolean shiftDown) {
+        // Shift+1 on PC = ! on Cybiko (dedicated unshifted key at col 9, bit 0x0004).
+        // With lazy Shift, Shift is NOT in the Cybiko matrix, so pressing ! directly
+        // gives CyOS unshifted ! (not Shift+! = ^).
+        if (shiftDown && keyCode == KeyEvent.VK_1) {
+            pressKeyWithHold(9, 0x0004, pressed);
+            return;
+        }
+
+        // Number keys: Fn + top-row letter combos (skip when Shift held)
+        if (!shiftDown) {
+            switch (keyCode) {
+                case KeyEvent.VK_1 -> { setFnLetter(3, 0x0002, pressed); return; } // Fn+Q
+                case KeyEvent.VK_2 -> { setFnLetter(3, 0x0040, pressed); return; } // Fn+W
+                case KeyEvent.VK_3 -> { setFnLetter(3, 0x0080, pressed); return; } // Fn+E
+                case KeyEvent.VK_4 -> { setFnLetter(2, 0x2000, pressed); return; } // Fn+R
+                case KeyEvent.VK_5 -> { setFnLetter(2, 0x4000, pressed); return; } // Fn+T
+                case KeyEvent.VK_6 -> { setFnLetter(1, 0x0020, pressed); return; } // Fn+Y
+                case KeyEvent.VK_7 -> { setFnLetter(1, 0x0040, pressed); return; } // Fn+U
+                case KeyEvent.VK_8 -> { setFnLetter(0, 0x1000, pressed); return; } // Fn+I
+                case KeyEvent.VK_9 -> { setFnLetter(0, 0x2000, pressed); return; } // Fn+O
+                case KeyEvent.VK_0 -> { setFnLetter(9, 0x0010, pressed); return; } // Fn+P
+            }
+        }
+
+        // Fn + middle-row symbols: @&$%*+-_=:
+        // Fn + bottom-row symbols: "#☆{}<>'/?
+        // Map PC punctuation keys to the Cybiko Fn+letter that produces them
         switch (keyCode) {
-            case KeyEvent.VK_1 -> { setFnLetter(3, 0x0002, pressed); return; }
-            case KeyEvent.VK_2 -> { setFnLetter(3, 0x0040, pressed); return; }
-            case KeyEvent.VK_3 -> { setFnLetter(3, 0x0080, pressed); return; }
-            case KeyEvent.VK_4 -> { setFnLetter(2, 0x2000, pressed); return; }
-            case KeyEvent.VK_5 -> { setFnLetter(2, 0x4000, pressed); return; }
-            case KeyEvent.VK_6 -> { setFnLetter(1, 0x0020, pressed); return; }
-            case KeyEvent.VK_7 -> { setFnLetter(1, 0x0040, pressed); return; }
-            case KeyEvent.VK_8 -> { setFnLetter(0, 0x1000, pressed); return; }
-            case KeyEvent.VK_9 -> { setFnLetter(0, 0x2000, pressed); return; }
-            case KeyEvent.VK_0 -> { setFnLetter(9, 0x0010, pressed); return; }
+            // Middle row: Fn+A=@, Fn+S=&, Fn+D=$, Fn+F=%, Fn+G=*, Fn+H=+, Fn+J=-, Fn+K=_, Fn+L==, Fn+;=:
+            case KeyEvent.VK_MINUS     -> { setFnLetter(1, 0x0080, pressed); return; } // Fn+J = -
+            case KeyEvent.VK_EQUALS    -> { setFnLetter(0, 0x4000, pressed); return; } // Fn+L = =
+            case KeyEvent.VK_SLASH     -> { setFnLetter(9, 0x0002, pressed); return; } // Fn+. = /
+            case KeyEvent.VK_QUOTE     -> { setFnLetter(0, 0x0100, pressed); return; } // Fn+M = '
+            // Bottom row: Fn+Z=", Fn+X=#, Fn+C=☆, Fn+V={, Fn+B=}, Fn+N=<, Fn+M=>, Fn+,=', Fn+.=/, Fn+!=?
         }
 
         int col = -1, bit = 0;
@@ -228,15 +291,49 @@ public class SwingRenderer implements FrameBufferRenderer {
             case KeyEvent.VK_LEFT   -> { col = 6; bit = 0x4000; }
             // Column A.7
             case KeyEvent.VK_CONTROL -> { col = 7; bit = 0x8000; } // Fn
-            // Column A.8
-            case KeyEvent.VK_SHIFT  -> { col = 8; bit = 0x8000; }
+            // Lazy Shift: set flag only, don't touch Cybiko matrix directly.
+            // Shift is added to matrix alongside letter keys that need it.
+            case KeyEvent.VK_SHIFT  -> {
+                if (pressed) {
+                    pcShiftHeld = true;
+                } else {
+                    pcShiftHeld = false;
+                    bus.setKeyState(8, 0x8000, false);
+                    int idx = findHeldKey(8, 0x8000);
+                    if (idx >= 0) removeHeldKey(idx);
+                }
+                return;
+            }
             // Column A.9 - P, period, Help, semicolon
             case KeyEvent.VK_END       -> { col = 9; bit = 0x0001; } // Help
             case KeyEvent.VK_PERIOD    -> { col = 9; bit = 0x0002; }
             case KeyEvent.VK_SEMICOLON -> { col = 9; bit = 0x0008; }
             case KeyEvent.VK_P         -> { col = 9; bit = 0x0010; }
+            // Exclamation mark (some platforms send this instead of Shift+VK_1)
+            case KeyEvent.VK_EXCLAMATION_MARK -> { col = 9; bit = 0x0004; }
+            // F12: keyboard probe — advance to next unknown matrix position
+            case KeyEvent.VK_F12 -> {
+                if (pressed) {
+                    // Release previous probe position
+                    if (probeCol >= 0) {
+                        bus.setKeyState(probeCol, probeBit, false);
+                    }
+                    probeIndex = (probeIndex + 1) % PROBE_POSITIONS.length;
+                    probeCol = PROBE_POSITIONS[probeIndex][0];
+                    probeBit = PROBE_POSITIONS[probeIndex][1];
+                    probeHoldLeft = PROBE_HOLD;
+                    bus.setKeyState(probeCol, probeBit, true);
+                    System.err.printf("[PROBE] #%d: col=%d bit=0x%04X%n", probeIndex, probeCol, probeBit);
+                }
+                return;
+            }
         }
         if (col >= 0) {
+            // Lazy Shift: add Cybiko Shift to matrix alongside this key
+            // when PC Shift is held (so CyOS sees both in the same DMA scan)
+            if (pcShiftHeld && pressed) {
+                pressKeyWithHold(8, 0x8000, true);
+            }
             pressKeyWithHold(col, bit, pressed);
         }
     }
@@ -479,6 +576,14 @@ public class SwingRenderer implements FrameBufferRenderer {
             // Fn+letter state machine (XT only) — all on emulation thread
             if (config.type == MachineConfig.MachineType.XT) {
                 processFnLetters();
+            }
+
+            // Keyboard probe: auto-release after hold expires
+            if (probeHoldLeft > 0) {
+                probeHoldLeft--;
+                if (probeHoldLeft == 0 && probeCol >= 0) {
+                    bus.setKeyState(probeCol, probeBit, false);
+                }
             }
         }
 

@@ -75,8 +75,8 @@ largely undefined, and several physical keys are missing entirely.
 
 | Physical Key | Shift Variant | Status |
 |-------------|---------------|--------|
+| `!`         | `^`           | FOUND: col 9, bit 0x0004 |
 | `,`         | `~`           | NOT MAPPED |
-| `!`         | `^`           | NOT MAPPED |
 | `(`         | —             | NOT MAPPED |
 | `)`         | —             | NOT MAPPED |
 
@@ -91,7 +91,8 @@ unknown. They likely occupy columns 9-12. Finding them requires either:
 | PC Key        | Cybiko Key | Notes |
 |---------------|------------|-------|
 | A-Z           | A-Z        | Direct |
-| 0-9           | Fn + letter| Simulated combo (unreliable ~80-90%) |
+| 0-9           | Fn + letter| Queue-based combo (reliable) |
+| Shift+1       | !          | Lazy Shift: ! pressed without Shift in matrix |
 | F1-F7         | F1-F7      | Direct |
 | Arrow keys    | Arrows     | Direct |
 | Enter         | Enter      | Direct |
@@ -102,33 +103,56 @@ unknown. They likely occupy columns 9-12. Finding them requires either:
 | Insert        | Ins        | Direct |
 | Home          | Select     | Direct |
 | End           | Help       | Direct |
-| Shift         | Shift      | Direct |
+| Shift         | Shift      | Lazy: only enters matrix with letter keys |
 | Ctrl          | Fn         | Direct |
 | Period        | .          | Direct |
 | Semicolon     | ;          | Direct |
-| !             | —          | NOT WORKING (unmapped) |
-| ,             | —          | NOT WORKING (unmapped) |
-| (             | —          | NOT WORKING (unmapped) |
-| )             | —          | NOT WORKING (unmapped) |
+| - (minus)     | Fn+J       | Queue-based combo |
+| = (equals)    | Fn+L       | Queue-based combo |
+| / (slash)     | Fn+.       | Queue-based combo |
+| ' (quote)     | Fn+M       | Queue-based combo |
+| ,             | —          | NOT MAPPED (unknown matrix position) |
+| (             | —          | NOT MAPPED (unknown matrix position) |
+| )             | —          | NOT MAPPED (unknown matrix position) |
+
+## Number Key Implementation
+
+Number keys (0-9) are Fn+letter combos. The emulator uses a queue-based state
+machine that runs entirely on the emulation thread to avoid DMA scan races:
+
+1. **EDT** enqueues digit on key press (release ignored — auto-completes)
+2. **render()** processes one digit at a time:
+   - First digit: press Fn → 8-frame delay (Fn must stabilize across multiple CyOS scans)
+   - Press letter → 6-frame hold → release letter
+   - Consecutive digits: Fn stays held, 3-frame delay between letters
+   - After queue empty: 6-frame delay → release Fn
+
+CyOS requires Fn to be visible in several consecutive keyboard DMA scans before it
+activates "Fn mode." A shorter Fn delay causes the letter to register as unmodified.
+
+## Lazy Shift
+
+PC Shift key does NOT immediately enter the Cybiko keyboard matrix. Instead, a
+`pcShiftHeld` flag is set. Shift is only added to the matrix when a key that needs
+CyOS-level shifting (letters, semicolon, etc.) is pressed alongside it.
+
+This prevents the `!` key problem: on PC, Shift+1 produces `!`. On the Cybiko, `!`
+is a dedicated unshifted key (col 9, bit 0x0004). If Shift entered the matrix first
+(as it does on a real PC keyboard — Shift is pressed before 1), CyOS would see
+Shift+! = `^` (the shifted variant). With lazy Shift, pressing Shift+1 on PC sends
+only `!` to the Cybiko matrix — Shift never appears.
 
 ## Known Issues
 
-### 1. Number Keys Unreliable (~80-90% success rate)
-When pressing a number (e.g., `1`), the emulator simulates Fn+Q by:
-1. Pressing Fn immediately on the Swing EDT thread
-2. Queuing the letter (Q) to be pressed 4 frames later in render()
-3. Holding both for minimum 3 frames, then releasing letter, then Fn
-
-**Failure mode:** The letter (Q) appears instead of the number (1). This happens
-because CyOS DMA-scans the keyboard matrix and can catch a window where the letter
-is pressed but Fn timing doesn't align with the scan.
-
-**Root cause:** Thread synchronization — Swing EDT modifies the key matrix array
-while the emulation thread reads it. No synchronization primitives protect access.
-
-### 2. Missing Punctuation Keys
+### 1. Missing Punctuation Keys
 Several physical keyboard keys have no matrix mapping. MAME's XT INPUT_PORTS
-definition is incomplete compared to the actual hardware.
+definition is incomplete compared to the actual hardware. Keys `,`, `(`, `)`
+are physical keys on the Cybiko XT but their column:bit positions are unknown.
+`!` was found at col 9, bit 0x0004 via keyboard probe mode.
+
+### 2. Missing Fn+Letter Symbols
+The Fn layer has symbols on the middle and bottom rows (e.g., Fn+A=@, Fn+Z=")
+that are not yet mapped in the emulator.
 
 ### 3. Shift Combinations
 Shift key is mapped but CyOS handles the shifted character generation internally.

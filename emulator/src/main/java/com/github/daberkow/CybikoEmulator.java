@@ -224,6 +224,10 @@ public class CybikoEmulator {
     public int getTimer16Count() { return timer16.length; }
     public RadioCoProcessor getRadio() { return radio; }
 
+    private long maxStepsLimit = 0; // 0 = unlimited
+
+    public void setMaxSteps(long maxSteps) { this.maxStepsLimit = maxSteps; }
+
     /** Initialize and start running (non-blocking). */
     public void start() {
         if (running) return;
@@ -244,18 +248,22 @@ public class CybikoEmulator {
     private void run() {
         int frameCounter = 0;
         long totalSteps = 0;
-        long maxSteps = 5_000_000_000L;
+        boolean hasLimit = maxStepsLimit > 0;
         int cyclesPerFrame = config.cyclesPerFrame;
         int numTimer16 = timer16.length;
 
         Log.log(Log.Category.BOOT, "=== Starting execution ===");
+        if (hasLimit) Log.log(Log.Category.BOOT, "Max steps: %,d", maxStepsLimit);
         long frameDeadline = System.nanoTime() + NANOS_PER_FRAME;
         long frameTotalNanos = 0;
         int frameTimingSamples = 0;
 
-        while (running && totalSteps < maxSteps) {
-            long remaining = maxSteps - totalSteps;
-            int cycleBudget = (remaining > cyclesPerFrame) ? cyclesPerFrame : (int) remaining;
+        while (running && (!hasLimit || totalSteps < maxStepsLimit)) {
+            int cycleBudget = cyclesPerFrame;
+            if (hasLimit) {
+                long remaining = maxStepsLimit - totalSteps;
+                if (remaining < cyclesPerFrame) cycleBudget = (int) remaining;
+            }
 
             // Cache which timers are active per frame
             boolean t8_0_run = timer8_0.isRunning();
@@ -333,7 +341,7 @@ public class CybikoEmulator {
                 bus.tickSci2();
                 totalSteps++;
 
-                if (totalSteps >= maxSteps) break;
+                if (hasLimit && totalSteps >= maxStepsLimit) break;
             }
 
             // Render frame
@@ -501,6 +509,7 @@ public class CybikoEmulator {
             System.out.println("  --sdr-host <ip>    - SDR bridge host (default: localhost)");
             System.out.println("  --sdr-port <port>  - SDR bridge port (default: 19201)");
             System.out.println("  --logging <cats>   - Log categories: all,none,status,cpu,radio,rtc,dma,io,boot,cfs,speaker");
+            System.out.println("  --max-steps <n>    - Stop after N CPU steps (default: unlimited)");
             System.exit(1);
         }
 
@@ -514,6 +523,7 @@ public class CybikoEmulator {
         String sdrHost = "localhost";
         int sdrPort = 19201;
         String loggingSpec = null;
+        long maxSteps = 0; // 0 = unlimited
         MachineConfig.MachineType machineType = MachineConfig.MachineType.XT;
 
         // Parse arguments
@@ -553,6 +563,7 @@ public class CybikoEmulator {
                 case "--sdr-host" -> { if (i + 1 < args.length) sdrHost = args[++i]; }
                 case "--sdr-port" -> { if (i + 1 < args.length) sdrPort = Integer.parseInt(args[++i]); }
                 case "--logging" -> { if (i + 1 < args.length) loggingSpec = args[++i]; }
+                case "--max-steps" -> { if (i + 1 < args.length) maxSteps = Long.parseLong(args[++i]); }
                 default -> {
                     if (bootRomPath == null) bootRomPath = args[i];
                     else if (flashRomPath == null) flashRomPath = args[i];
@@ -565,6 +576,7 @@ public class CybikoEmulator {
 
         MachineConfig config = MachineConfig.forType(machineType);
         CybikoEmulator emu = new CybikoEmulator(config);
+        if (maxSteps > 0) emu.setMaxSteps(maxSteps);
 
         try {
             emu.loadBootRom(Path.of(bootRomPath));
