@@ -17,6 +17,7 @@ You need two ROM files per machine variant. These come from MAME ROM sets:
 |---------|-----------|----------|
 | Cybiko Xtreme (default) | `cyrom150.bin` + `cyos_v1508.bin` | `cybikoxt.zip` |
 | Cybiko Classic V1 | `cyrom112.bin` + `flash_v1246.bin` | `cybiko.zip` |
+| Cybiko V2 | `cyrom117.bin` + `cyos_v1357.bin` + `flash_v1357.bin` | `cybikov2.zip` |
 
 ROMs can be found at the [Cybiko Archive on archive.org](https://archive.org/details/cybiko) or in MAME ROM collections.
 
@@ -30,6 +31,9 @@ java -jar Cybiko-Emulator-*.jar cyrom150.bin cyos_v1508.bin
 
 # Cybiko Classic V1
 java -jar Cybiko-Emulator-*.jar --machine v1 cyrom112.bin flash_v1246.bin
+
+# Cybiko V2
+java -jar Cybiko-Emulator-*.jar --machine v2 cyrom117.bin cyos_v1357.bin flash_v1357.bin
 ```
 
 > A full distribution ZIP with launch scripts is also available on the releases page if you prefer that.

@@ -12,6 +12,8 @@ Learning project intended for eventual port to C.
 ./gradlew run --args="cyrom150.bin cyos_v1508.bin"
 # Classic V1:
 ./gradlew run --args="--machine v1 cyrom112.bin flash_v1246.bin"
+# V2:
+./gradlew run --args="--machine v2 cyrom117.bin cyos_v1357.bin flash_v1357.bin"
 ```
 
 ### Options
@@ -59,6 +61,7 @@ CFS image that is lost on exit.
 ROM files:
 - Xtreme: `src/main/resources/cybikoxt/cyrom150.bin` + `cyos_v1508.bin` (from MAME cybikoxt.zip)
 - Classic V1: `cyrom112.bin` + `flash_v1246.bin` (from MAME cybiko.zip)
+- V2: `cyrom117.bin` + `cyos_v1357.bin` + `flash_v1357.bin` (from MAME cybikov2.zip)
 App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice.app`).
 
 ### Radio Networking
@@ -71,7 +74,7 @@ App files: `../cybiko-archive/cybiko/cybiko/apps/` (e.g., `calc.app`, `dice/dice
 ./gradlew run --args="cyrom150.bin cyos_v1508.bin --radio sdr --sdr-host 192.168.1.50"
 
 # V2 with radio (may help boot further)
-./gradlew run --args="--machine v2 <bootrom> <flash> --radio lan"
+./gradlew run --args="--machine v2 cyrom117.bin cyos_v1357.bin flash_v1357.bin --radio lan"
 ```
 
 ### Debug Features
@@ -193,9 +196,14 @@ Clock source mapping varies per channel (from MAME h8s2319.cpp):
 - `FrameBufferRenderer` / `SwingRenderer` / `ConsoleRenderer` - Display
 - `SwingRenderer` - Swing GUI with keyboard input. Bulk setRGB for rendering. Takes
   MachineConfig to select XT (15-col, Fn+letter numbers) or V1 (9-col, dedicated numbers)
-  keyboard layout. Queue-based Fn+letter injection for XT number keys. Lazy Shift:
-  PC Shift sets flag but doesn't enter Cybiko matrix until paired with a letter key,
-  preventing Shift+1→^ when user wants !. Minimum key hold time (3 frames) for all keys.
+  keyboard layout. Three input mechanisms: (1) **Fn combo queue** — packs col:bit,
+  processes one combo at a time with Fn press→delay→letter→hold→release cycle;
+  parameterized fnCol/fnBit per machine (XT: col 7/0x8000, V1: col 1/0x80).
+  (2) **Lazy Shift** — PC Shift sets pcShiftHeld flag but doesn't enter Cybiko matrix
+  until paired with a letter key; prevents Shift+1→^ when user wants !.
+  (3) **Shift combo queue** — for keys needing Cybiko Shift (^, ~, |, \); presses
+  Shift first with 4-frame delay then key. Minimum key hold (3 frames) for all keys.
+  Keyboard probe mode (F12) for finding unknown matrix positions.
 - `RadioCoProcessor` - AVR radio co-processor stub (AT90S2313). Emulates SCI UART
   protocol with the H8S CPU. Variable-length command protocol: 0x01=3 bytes (init,
   channel, config), 0x30/0xCF=2 bytes (poll, scan), all others=2 bytes. Two call paths:
@@ -382,9 +390,14 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   instead of R0L). Caused BCD-to-binary conversion to lose tens digit (bug #16)
 
 ## Known Issues
-- **Missing XT punctuation keys**: Physical Cybiko keys `,` `(` `)` have unknown
-  matrix positions (probing cols 9-13 found nothing). `!` was found at col 9, bit
-  0x0004. The Fn+letter symbol layer (@, &, $, %, *, +, etc.) is partially mapped.
+- **XT keyboard fully mapped**: All physical keys found via probe mode. Previously
+  missing keys: `!` (col 9, 0x0004), `,` (col 0, 0x0400), `(` (col 2, 0x0400),
+  `)` (col 0, 0x0200). Full Fn+letter symbol layer and Shift+key combos mapped.
+  Only unmapped: backtick (no Cybiko equivalent), Cybiko ☆ symbol (Fn+C, no PC key).
+  See [docs/xt-keyboard.md](docs/xt-keyboard.md) for complete matrix and PC mapping.
+- **V1 Fn+' for " not working**: Shift+' on PC should produce " via Fn+' on V1 Cybiko.
+  The Fn combo queue (same as XT) doesn't produce results. V1 CyOS may use a different
+  mechanism for the Fn layer, or different timing. Needs investigation (low priority).
 - **V2 CyOS stuck at Cybiko logo**: V2 boots through SPI flash loading, reaches the
   animated Cybiko logo (VRAM hash C0DBEF72, same as V1/XT) but never progresses to
   desktop. I2C RTC communication now works (bug #10 fix), but the desktop app never
@@ -432,7 +445,9 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - Multi-machine support: V1 (Classic), V2, and XT (Xtreme) selectable via --machine flag
 - CyOS fully boots to interactive "Congratulations!" welcome screen (or desktop with NVRAM) on XT
 - V1 CyOS fully boots from SPI flash (AT45DB041 + DTC bulk transfer) to interactive UI
-- Keyboard input works (letters, navigation keys, Fn+letter for numbers on XT, dedicated numbers on V1)
+- Keyboard fully mapped on XT: letters, arrows, F1-F7, all punctuation/symbols via
+  lazy Shift + Fn combo queue + Shift combo queue. See docs/xt-keyboard.md.
+- Keyboard works on V1: letters, arrows, numbers, most punctuation. Fn+' for " not working.
 - Minimum key hold time (3 frames) prevents fast key presses from being missed
 - RTC shows correct date/time on all variants (PCF8593 I2C, real-time advancement)
 - Selectable log categories via --logging flag (cpu,radio,rtc,dma,io,status,boot,cfs,speaker)
@@ -479,21 +494,21 @@ directly to MAME's `m_key[0]`-`m_key[14]` input ports.
 ### Column Addressing
 | Column | Address    | Keys (bit positions in 16-bit read) |
 |--------|------------|-------------------------------------|
-| 0      | 0xE00100   | I(12), O(13), P(14)                |
-| 1      | 0xE00200   | Y(5), U(6), J(7), H(8), N(9), B(10) |
-| 2      | 0xE00400   | R(13), T(14), G(7), F(8), V(10), C(11) |
-| 3      | 0xE00800   | Q(1), W(6), E(7), D(8), S(9), A(10) |
-| 4      | 0xE01000   | Tab(0), Esc(15)                     |
-| 5      | 0xE02000   | Del(8), Enter(9), Space(10)         |
-| 6      | 0xE04000   | .(10), @(11)                        |
-| 7      | 0xE08000   | Fn(15), Shift(0)                    |
-| 8      | 0xE10000   | Right(0)                            |
-| 9      | 0xE20000   | Down(0)                             |
-| 10     | 0xE40000   | Left(0)                             |
-| 11     | 0xE80000   | Up(0)                               |
-| 12     | 0xF00000   | K(5), L(6), M(7), Z(8)             |
-| 13     | 0xF80000   | Select(12), P-mapped(4)             |
-| 14     | 0xFC0000   | Power(0)                            |
+| 0      | 0xE00100   | F7(0), M(8), )(9), ,(10), K(11), I(12), O(13), L(14) |
+| 1      | 0xE00200   | F6(0), G(1), B(2), N(3), H(4), Y(5), U(6), J(7) |
+| 2      | 0xE00400   | F5(0), D(8), C(9), ((10), V(11), F(12), R(13), T(14) |
+| 3      | 0xE00800   | F4(0), Q(1), A(2), Z(3), X(4), S(5), W(6), E(7) |
+| 4      | 0xE01000   | F3(0), Enter(3), Select(4), CtxMenu(5), Space(6) |
+| 5      | 0xE02000   | F2(0), Tab(7), Del(8), Ins(9), Esc(10)            |
+| 6      | 0xE04000   | F1(0), Up(11), Right(12), Down(13), Left(14)      |
+| 7      | 0xE08000   | Fn(15)                                             |
+| 8      | 0xE10000   | Shift(15)                                          |
+| 9      | 0xE20000   | Help(0), Period(1), !(2), Semicolon(3), P(4)       |
+| 10     | 0xE40000   | (no keys found — fully probed)                     |
+| 11     | 0xE80000   | (no keys found — fully probed)                     |
+| 12     | 0xF00000   | (no keys found — fully probed)                     |
+| 13     | 0xF80000   | (MAME: Help(0), Period(1), P(4) — see note)        |
+| 14     | 0xFC0000   | Power(15)                                          |
 
 ### Number Keys (Fn + Letter combos)
 The Cybiko Xtreme has no dedicated number keys. Numbers are entered via:

@@ -19,22 +19,23 @@ public class SwingRenderer implements FrameBufferRenderer {
     private final MachineConfig config;
     private AddressBus bus;
 
-    // Fn+letter combo for XT number keys.
-    // EDT queues digits; render() processes ONE at a time through the full
+    // Fn+letter combo queue (numbers and symbols, all machine types).
+    // EDT queues combos; render() processes ONE at a time through the full
     // Fn-then-letter sequence on the emulation thread (no DMA race).
+    // Queue entries are packed as (col << 16) | bit.
+    // Fn key position varies: XT = col 7 bit 0x8000, V1/V2 = col 1 bit 0x80.
+    private final int fnCol;
+    private final int fnBit;
     private static final int FN_PRESS_DELAY = 8;   // Frames Fn must be held alone before first letter
     private static final int FN_BETWEEN_DELAY = 3; // Frames between consecutive letters (Fn stays held)
     private static final int FN_RELEASE_HOLD = 6;  // Frames to hold Fn after last letter released
-    private static final int NUM_MIN_HOLD = 6;     // Minimum frames to hold letter in matrix
-    private static final int[] NUM_COLS = {9, 3, 3, 3, 2, 2, 1, 1, 0, 0};
-    private static final int[] NUM_BITS = {0x0010, 0x0002, 0x0040, 0x0080, 0x2000, 0x4000, 0x0020, 0x0040, 0x1000, 0x2000};
-    // EDT queue: digits waiting to be typed (circular buffer)
-    private static final int NUM_QUEUE_SIZE = 16;
-    private final int[] numQueue = new int[NUM_QUEUE_SIZE];
-    private int numQueueHead = 0, numQueueTail = 0;
-    // Current digit being processed (-1 = idle)
-    private int currentDigit = -1;
-    private int numHoldLeft = 0;     // hold countdown for current letter
+    private static final int FN_KEY_HOLD = 6;      // Minimum frames to hold letter in matrix
+    private static final int FN_QUEUE_SIZE = 16;
+    private final int[] fnQueue = new int[FN_QUEUE_SIZE];
+    private int fnQueueHead = 0, fnQueueTail = 0;
+    // Current combo being processed (-1 = idle, otherwise packed col:bit)
+    private int currentCombo = -1;
+    private int comboHoldLeft = 0;   // hold countdown for current letter
     private boolean fnActive = false;
     private int fnDelay = 0;
     private int fnReleaseDelay = 0;
@@ -46,38 +47,62 @@ public class SwingRenderer implements FrameBufferRenderer {
     // Shift entirely, preventing CyOS from seeing Shift+! = ^.
     private boolean pcShiftHeld = false;
 
+    // Shift+key combo queue: like Fn combos but presses Cybiko Shift before the key.
+    // Used for keys like ~ (Shift+comma) and ^ (Shift+!) where CyOS needs to see
+    // Shift stable in the matrix before the key appears.
+    private static final int SHIFT_PRESS_DELAY = 4; // Frames Shift must be held before key
+    private static final int SHIFT_KEY_HOLD = 6;    // Frames to hold key
+    private int shiftCombo = -1;       // packed (col << 16) | bit, or -1 = idle
+    private int shiftComboDelay = 0;
+    private int shiftComboHold = 0;
+
     // Keyboard probe mode: F12 cycles through unknown column:bit positions.
     // Each press activates the next position for PROBE_HOLD frames.
     private static final int PROBE_HOLD = 10;
     private int probeIndex = -1;
     private int probeHoldLeft = 0;
     private int probeCol = -1, probeBit = 0;
-    // Candidate positions to test (columns 9-13, unused bits)
+    // Candidate positions to test — unused bits in cols 0-8.
+    // Looking for: , (comma), ( (left paren), ) (right paren)
+    // ( and ) physically flank Space (col 4), so try col 4 first.
+    // , is near . (col 9) and ! (col 9), try nearby cols.
     private static final int[][] PROBE_POSITIONS = {
-        // col 9 unused bits
-        {9, 0x0004}, {9, 0x0020}, {9, 0x0040}, {9, 0x0080},
-        {9, 0x0100}, {9, 0x0200}, {9, 0x0400}, {9, 0x0800},
-        {9, 0x1000}, {9, 0x2000}, {9, 0x4000}, {9, 0x8000},
-        // col 10
-        {10, 0x0001}, {10, 0x0002}, {10, 0x0004}, {10, 0x0008},
-        {10, 0x0010}, {10, 0x0020}, {10, 0x0040}, {10, 0x0080},
-        {10, 0x0100}, {10, 0x0200}, {10, 0x0400}, {10, 0x0800},
-        {10, 0x1000}, {10, 0x2000}, {10, 0x4000}, {10, 0x8000},
-        // col 11
-        {11, 0x0001}, {11, 0x0002}, {11, 0x0004}, {11, 0x0008},
-        {11, 0x0010}, {11, 0x0020}, {11, 0x0040}, {11, 0x0080},
-        {11, 0x0100}, {11, 0x0200}, {11, 0x0400}, {11, 0x0800},
-        {11, 0x1000}, {11, 0x2000}, {11, 0x4000}, {11, 0x8000},
-        // col 12
-        {12, 0x0001}, {12, 0x0002}, {12, 0x0004}, {12, 0x0008},
-        {12, 0x0010}, {12, 0x0020}, {12, 0x0040}, {12, 0x0080},
-        {12, 0x0100}, {12, 0x0200}, {12, 0x0400}, {12, 0x0800},
-        {12, 0x1000}, {12, 0x2000}, {12, 0x4000}, {12, 0x8000},
-        // col 13 unused bits
-        {13, 0x0002}, {13, 0x0004}, {13, 0x0008}, {13, 0x0010},
-        {13, 0x0020}, {13, 0x0040}, {13, 0x0080},
-        {13, 0x0100}, {13, 0x0200}, {13, 0x0400}, {13, 0x0800},
-        {13, 0x1000}, {13, 0x2000}, {13, 0x4000}, {13, 0x8000},
+        // col 4 unused bits — ( and ) likely here (near Space at 0x0040)
+        {4, 0x0002}, {4, 0x0004}, {4, 0x0020}, {4, 0x0080},
+        {4, 0x0100}, {4, 0x0200}, {4, 0x0400}, {4, 0x0800},
+        {4, 0x1000}, {4, 0x2000}, {4, 0x4000}, {4, 0x8000},
+        // col 5 unused bits — near Tab/Del/Esc cluster
+        {5, 0x0002}, {5, 0x0004}, {5, 0x0008}, {5, 0x0010},
+        {5, 0x0020}, {5, 0x0040}, {5, 0x0800},
+        {5, 0x1000}, {5, 0x2000}, {5, 0x4000}, {5, 0x8000},
+        // col 7 unused bits — Fn column, maybe ( ) near Fn/Shift
+        {7, 0x0001}, {7, 0x0002}, {7, 0x0004}, {7, 0x0008},
+        {7, 0x0010}, {7, 0x0020}, {7, 0x0040}, {7, 0x0080},
+        {7, 0x0100}, {7, 0x0200}, {7, 0x0400}, {7, 0x0800},
+        {7, 0x1000}, {7, 0x2000}, {7, 0x4000},
+        // col 8 unused bits — Shift column
+        {8, 0x0001}, {8, 0x0002}, {8, 0x0004}, {8, 0x0008},
+        {8, 0x0010}, {8, 0x0020}, {8, 0x0040}, {8, 0x0080},
+        {8, 0x0100}, {8, 0x0200}, {8, 0x0400}, {8, 0x0800},
+        {8, 0x1000}, {8, 0x2000}, {8, 0x4000},
+        // col 0 unused bits — near M/K/I/O/L
+        {0, 0x0002}, {0, 0x0004}, {0, 0x0008}, {0, 0x0010},
+        {0, 0x0020}, {0, 0x0040}, {0, 0x0080}, {0, 0x0200},
+        {0, 0x0400}, {0, 0x8000},
+        // col 6 unused bits — near arrows/F1
+        {6, 0x0002}, {6, 0x0004}, {6, 0x0008}, {6, 0x0010},
+        {6, 0x0020}, {6, 0x0040}, {6, 0x0080}, {6, 0x0100},
+        {6, 0x0200}, {6, 0x0400}, {6, 0x8000},
+        // col 1 unused bits
+        {1, 0x0100}, {1, 0x0200}, {1, 0x0400}, {1, 0x0800},
+        {1, 0x1000}, {1, 0x2000}, {1, 0x4000}, {1, 0x8000},
+        // col 2 unused bits
+        {2, 0x0002}, {2, 0x0004}, {2, 0x0008}, {2, 0x0010},
+        {2, 0x0020}, {2, 0x0040}, {2, 0x0080}, {2, 0x0400},
+        {2, 0x8000},
+        // col 3 unused bits
+        {3, 0x0100}, {3, 0x0200}, {3, 0x0400}, {3, 0x0800},
+        {3, 0x1000}, {3, 0x2000}, {3, 0x4000}, {3, 0x8000},
     };
 
     // Minimum key hold time
@@ -97,6 +122,12 @@ public class SwingRenderer implements FrameBufferRenderer {
 
     public SwingRenderer(MachineConfig config) {
         this.config = config;
+        // Fn key position: XT = col 7 bit 0x8000, V1/V2 = col 1 bit 0x80
+        if (config.type == MachineConfig.MachineType.XT) {
+            fnCol = 7; fnBit = 0x8000;
+        } else {
+            fnCol = 1; fnBit = 0x80;
+        }
         int w = HD66421Lcd.WIDTH;
         int h = HD66421Lcd.HEIGHT;
         image = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
@@ -191,7 +222,7 @@ public class SwingRenderer implements FrameBufferRenderer {
         if (config.type == MachineConfig.MachineType.XT) {
             handleKeyXT(keyCode, pressed, shiftDown);
         } else {
-            handleKeyV1(keyCode, pressed);
+            handleKeyV1(keyCode, pressed, shiftDown);
         }
     }
 
@@ -199,40 +230,60 @@ public class SwingRenderer implements FrameBufferRenderer {
     // Cybiko Xtreme keyboard (15 columns x 16-bit, Fn+letter for numbers)
     // ========================================================================
     private void handleKeyXT(int keyCode, boolean pressed, boolean shiftDown) {
-        // Shift+1 on PC = ! on Cybiko (dedicated unshifted key at col 9, bit 0x0004).
-        // With lazy Shift, Shift is NOT in the Cybiko matrix, so pressing ! directly
-        // gives CyOS unshifted ! (not Shift+! = ^).
-        if (shiftDown && keyCode == KeyEvent.VK_1) {
-            pressKeyWithHold(9, 0x0004, pressed);
-            return;
+        // === Shifted PC keys → Cybiko Fn+letter symbols or Shift+key combos ===
+        // With lazy Shift, Cybiko Shift is NOT in the matrix, so Fn combos work cleanly.
+        if (shiftDown) {
+            switch (keyCode) {
+                // Shift+number → symbols
+                case KeyEvent.VK_1 -> { pressKeyWithHold(9, 0x0004, pressed); return; } // ! (direct key)
+                case KeyEvent.VK_2 -> { enqueueFnCombo(3, 0x0004, pressed); return; }   // @ = Fn+A
+                case KeyEvent.VK_3 -> { enqueueFnCombo(3, 0x0010, pressed); return; }   // # = Fn+X
+                case KeyEvent.VK_4 -> { enqueueFnCombo(2, 0x0100, pressed); return; }   // $ = Fn+D
+                case KeyEvent.VK_5 -> { enqueueFnCombo(2, 0x1000, pressed); return; }   // % = Fn+F
+                case KeyEvent.VK_6 -> { pressShiftedKey(9, 0x0004, pressed); return; }  // ^ = Shift+!
+                case KeyEvent.VK_7 -> { enqueueFnCombo(3, 0x0020, pressed); return; }   // & = Fn+S
+                case KeyEvent.VK_8 -> { enqueueFnCombo(1, 0x0002, pressed); return; }   // * = Fn+G
+                case KeyEvent.VK_9 -> { pressKeyWithHold(2, 0x0400, pressed); return; } // ( (direct key)
+                case KeyEvent.VK_0 -> { pressKeyWithHold(0, 0x0200, pressed); return; } // ) (direct key)
+                // Shift+punctuation → symbols
+                case KeyEvent.VK_BACK_QUOTE -> { pressShiftedKey(0, 0x0400, pressed); return; } // ~ = Shift+,
+                case KeyEvent.VK_MINUS  -> { enqueueFnCombo(0, 0x0800, pressed); return; }  // _ = Fn+K
+                case KeyEvent.VK_EQUALS -> { enqueueFnCombo(1, 0x0010, pressed); return; }  // + = Fn+H
+                case KeyEvent.VK_SEMICOLON -> { enqueueFnCombo(9, 0x0008, pressed); return; } // : = Fn+;
+                case KeyEvent.VK_QUOTE  -> { enqueueFnCombo(3, 0x0008, pressed); return; }  // " = Fn+Z
+                case KeyEvent.VK_OPEN_BRACKET  -> { enqueueFnCombo(2, 0x0800, pressed); return; } // { = Fn+V
+                case KeyEvent.VK_CLOSE_BRACKET -> { enqueueFnCombo(1, 0x0004, pressed); return; } // } = Fn+B
+                case KeyEvent.VK_COMMA  -> { enqueueFnCombo(1, 0x0008, pressed); return; }  // < = Fn+N
+                case KeyEvent.VK_PERIOD -> { enqueueFnCombo(0, 0x0100, pressed); return; }  // > = Fn+M
+                case KeyEvent.VK_SLASH  -> { enqueueFnCombo(9, 0x0004, pressed); return; }  // ? = Fn+!
+                case KeyEvent.VK_BACK_SLASH -> { pressShiftedKey(9, 0x0008, pressed); return; } // | = Shift+;
+            }
+            // Fall through for shifted letter keys — lazy Shift adds Cybiko Shift below
         }
 
-        // Number keys: Fn + top-row letter combos (skip when Shift held)
+        // === Unshifted PC keys → numbers (Fn+letter) and symbols ===
         if (!shiftDown) {
             switch (keyCode) {
-                case KeyEvent.VK_1 -> { setFnLetter(3, 0x0002, pressed); return; } // Fn+Q
-                case KeyEvent.VK_2 -> { setFnLetter(3, 0x0040, pressed); return; } // Fn+W
-                case KeyEvent.VK_3 -> { setFnLetter(3, 0x0080, pressed); return; } // Fn+E
-                case KeyEvent.VK_4 -> { setFnLetter(2, 0x2000, pressed); return; } // Fn+R
-                case KeyEvent.VK_5 -> { setFnLetter(2, 0x4000, pressed); return; } // Fn+T
-                case KeyEvent.VK_6 -> { setFnLetter(1, 0x0020, pressed); return; } // Fn+Y
-                case KeyEvent.VK_7 -> { setFnLetter(1, 0x0040, pressed); return; } // Fn+U
-                case KeyEvent.VK_8 -> { setFnLetter(0, 0x1000, pressed); return; } // Fn+I
-                case KeyEvent.VK_9 -> { setFnLetter(0, 0x2000, pressed); return; } // Fn+O
-                case KeyEvent.VK_0 -> { setFnLetter(9, 0x0010, pressed); return; } // Fn+P
+                // Numbers: Fn + top-row letter combos
+                case KeyEvent.VK_1 -> { enqueueFnCombo(3, 0x0002, pressed); return; } // 1 = Fn+Q
+                case KeyEvent.VK_2 -> { enqueueFnCombo(3, 0x0040, pressed); return; } // 2 = Fn+W
+                case KeyEvent.VK_3 -> { enqueueFnCombo(3, 0x0080, pressed); return; } // 3 = Fn+E
+                case KeyEvent.VK_4 -> { enqueueFnCombo(2, 0x2000, pressed); return; } // 4 = Fn+R
+                case KeyEvent.VK_5 -> { enqueueFnCombo(2, 0x4000, pressed); return; } // 5 = Fn+T
+                case KeyEvent.VK_6 -> { enqueueFnCombo(1, 0x0020, pressed); return; } // 6 = Fn+Y
+                case KeyEvent.VK_7 -> { enqueueFnCombo(1, 0x0040, pressed); return; } // 7 = Fn+U
+                case KeyEvent.VK_8 -> { enqueueFnCombo(0, 0x1000, pressed); return; } // 8 = Fn+I
+                case KeyEvent.VK_9 -> { enqueueFnCombo(0, 0x2000, pressed); return; } // 9 = Fn+O
+                case KeyEvent.VK_0 -> { enqueueFnCombo(9, 0x0010, pressed); return; } // 0 = Fn+P
+                // Symbols: Fn + letter combos
+                case KeyEvent.VK_MINUS  -> { enqueueFnCombo(1, 0x0080, pressed); return; } // - = Fn+J
+                case KeyEvent.VK_EQUALS -> { enqueueFnCombo(0, 0x4000, pressed); return; } // = = Fn+L
+                case KeyEvent.VK_SLASH  -> { enqueueFnCombo(9, 0x0002, pressed); return; } // / = Fn+.
+                case KeyEvent.VK_BACK_SLASH -> { pressShiftedKey(9, 0x0002, pressed); return; } // \ = Cybiko Shift+.
+                case KeyEvent.VK_QUOTE -> { enqueueFnCombo(0, 0x0400, pressed); return; } // ' = Fn+,
+                case KeyEvent.VK_OPEN_BRACKET  -> { enqueueFnCombo(2, 0x0400, pressed); return; } // [ = Fn+(
+                case KeyEvent.VK_CLOSE_BRACKET -> { enqueueFnCombo(0, 0x0200, pressed); return; } // ] = Fn+)
             }
-        }
-
-        // Fn + middle-row symbols: @&$%*+-_=:
-        // Fn + bottom-row symbols: "#☆{}<>'/?
-        // Map PC punctuation keys to the Cybiko Fn+letter that produces them
-        switch (keyCode) {
-            // Middle row: Fn+A=@, Fn+S=&, Fn+D=$, Fn+F=%, Fn+G=*, Fn+H=+, Fn+J=-, Fn+K=_, Fn+L==, Fn+;=:
-            case KeyEvent.VK_MINUS     -> { setFnLetter(1, 0x0080, pressed); return; } // Fn+J = -
-            case KeyEvent.VK_EQUALS    -> { setFnLetter(0, 0x4000, pressed); return; } // Fn+L = =
-            case KeyEvent.VK_SLASH     -> { setFnLetter(9, 0x0002, pressed); return; } // Fn+. = /
-            case KeyEvent.VK_QUOTE     -> { setFnLetter(0, 0x0100, pressed); return; } // Fn+M = '
-            // Bottom row: Fn+Z=", Fn+X=#, Fn+C=☆, Fn+V={, Fn+B=}, Fn+N=<, Fn+M=>, Fn+,=', Fn+.=/, Fn+!=?
         }
 
         int col = -1, bit = 0;
@@ -245,6 +296,7 @@ public class SwingRenderer implements FrameBufferRenderer {
             case KeyEvent.VK_I      -> { col = 0; bit = 0x1000; }
             case KeyEvent.VK_O      -> { col = 0; bit = 0x2000; }
             case KeyEvent.VK_L      -> { col = 0; bit = 0x4000; }
+            case KeyEvent.VK_COMMA  -> { col = 0; bit = 0x0400; } // , (comma/tilde key)
             // Column A.1
             case KeyEvent.VK_F6     -> { col = 1; bit = 0x0001; }
             case KeyEvent.VK_G      -> { col = 1; bit = 0x0002; }
@@ -342,7 +394,13 @@ public class SwingRenderer implements FrameBufferRenderer {
     // Cybiko V1/V2 keyboard (9 columns x 8-bit, dedicated number keys)
     // From MAME cybiko INPUT_PORTS (A.0-A.8)
     // ========================================================================
-    private void handleKeyV1(int keyCode, boolean pressed) {
+    private void handleKeyV1(int keyCode, boolean pressed, boolean shiftDown) {
+        // Shift+' on PC = " on V1 Cybiko (Fn+' combo, queue-based)
+        if (shiftDown && keyCode == KeyEvent.VK_QUOTE) {
+            enqueueFnCombo(8, 0x01, pressed); // ' key, Fn added by queue state machine
+            return;
+        }
+
         int col = -1, bit = 0;
         switch (keyCode) {
             // Column 0 (A.0): F7, Esc, Del, Left, Q, A, `, Shift
@@ -483,17 +541,17 @@ public class SwingRenderer implements FrameBufferRenderer {
     }
 
     /** Process Fn+letter state machine on emulation thread.
-     *  Types one digit at a time: Fn press → delay → letter press → hold → release.
-     *  Fn stays held between consecutive digits (shorter delay). */
-    private void processFnLetters() {
-        boolean hasQueued = numQueueHead != numQueueTail;
+     *  Types one combo at a time: Fn press → delay → letter press → hold → release.
+     *  Fn stays held between consecutive combos (shorter delay). */
+    private void processFnCombos() {
+        boolean hasQueued = fnQueueHead != fnQueueTail;
 
-        // State: idle, no queued digits → release Fn if active
-        if (currentDigit < 0 && !hasQueued) {
+        // State: idle, no queued combos → release Fn if active
+        if (currentCombo < 0 && !hasQueued) {
             if (fnActive) {
                 fnReleaseDelay++;
                 if (fnReleaseDelay >= FN_RELEASE_HOLD) {
-                    bus.setKeyState(7, 0x8000, false);
+                    bus.setKeyState(fnCol, fnBit, false);
                     fnActive = false;
                     fnReleaseDelay = 0;
                 }
@@ -502,20 +560,18 @@ public class SwingRenderer implements FrameBufferRenderer {
         }
         fnReleaseDelay = 0;
 
-        // Start next digit from queue if idle
-        if (currentDigit < 0 && hasQueued) {
-            currentDigit = numQueue[numQueueHead];
-            numQueueHead = (numQueueHead + 1) % NUM_QUEUE_SIZE;
+        // Start next combo from queue if idle
+        if (currentCombo < 0 && hasQueued) {
+            currentCombo = fnQueue[fnQueueHead];
+            fnQueueHead = (fnQueueHead + 1) % FN_QUEUE_SIZE;
             if (!fnActive) {
-                // First digit: press Fn and wait
-                bus.setKeyState(7, 0x8000, true);
+                bus.setKeyState(fnCol, fnBit, true);
                 fnActive = true;
                 fnDelay = FN_PRESS_DELAY;
             } else {
-                // Fn already held from previous digit: shorter delay
                 fnDelay = FN_BETWEEN_DELAY;
             }
-            numHoldLeft = -1; // letter not yet pressed
+            comboHoldLeft = -1; // letter not yet pressed
         }
 
         // Fn delay countdown
@@ -524,39 +580,80 @@ public class SwingRenderer implements FrameBufferRenderer {
             return;
         }
 
+        // Unpack current combo
+        int col = currentCombo >>> 16;
+        int cbit = currentCombo & 0xFFFF;
+
         // Press letter if not yet pressed
-        if (currentDigit >= 0 && numHoldLeft < 0) {
-            bus.setKeyState(NUM_COLS[currentDigit], NUM_BITS[currentDigit], true);
-            numHoldLeft = NUM_MIN_HOLD;
+        if (currentCombo >= 0 && comboHoldLeft < 0) {
+            bus.setKeyState(col, cbit, true);
+            comboHoldLeft = FN_KEY_HOLD;
             return;
         }
 
         // Hold countdown
-        if (numHoldLeft > 0) {
-            numHoldLeft--;
+        if (comboHoldLeft > 0) {
+            comboHoldLeft--;
             return;
         }
 
-        // Release letter, move to next digit
-        if (currentDigit >= 0 && numHoldLeft == 0) {
-            bus.setKeyState(NUM_COLS[currentDigit], NUM_BITS[currentDigit], false);
-            currentDigit = -1;
+        // Release letter, move to next combo
+        if (currentCombo >= 0 && comboHoldLeft == 0) {
+            bus.setKeyState(col, cbit, false);
+            currentCombo = -1;
         }
     }
 
-    /** Fn + letter combo for XT number keys. EDT enqueues digit;
-     *  render() types them one at a time on the emulation thread. */
-    private void setFnLetter(int letterCol, int letterBit, boolean pressed) {
-        if (!pressed) return; // only queue on key down; release is automatic after hold
-        for (int i = 0; i < 10; i++) {
-            if (NUM_COLS[i] == letterCol && NUM_BITS[i] == letterBit) {
-                int next = (numQueueTail + 1) % NUM_QUEUE_SIZE;
-                if (next != numQueueHead) { // not full
-                    numQueue[numQueueTail] = i;
-                    numQueueTail = next;
-                }
-                return;
+    /** Queue an Fn+letter combo. EDT enqueues; render() processes on emulation thread.
+     *  Only queues on key press; release is automatic after hold timer. */
+    private void enqueueFnCombo(int letterCol, int letterBit, boolean pressed) {
+        if (!pressed) return;
+        int next = (fnQueueTail + 1) % FN_QUEUE_SIZE;
+        if (next != fnQueueHead) {
+            fnQueue[fnQueueTail] = (letterCol << 16) | letterBit;
+            fnQueueTail = next;
+        }
+    }
+
+    /** Queue a key that needs Cybiko Shift (e.g., ^ = Shift+!, ~ = Shift+,, | = Shift+;).
+     *  Shift is pressed first and held for SHIFT_PRESS_DELAY frames before pressing the key,
+     *  ensuring CyOS sees Shift stable in the matrix. Only queues on press; release is automatic. */
+    private void pressShiftedKey(int col, int bit, boolean pressed) {
+        if (!pressed || shiftCombo >= 0) return; // only on press; ignore auto-repeat
+        shiftCombo = (col << 16) | bit;
+        shiftComboDelay = SHIFT_PRESS_DELAY;
+        shiftComboHold = 0;
+        // Press Shift immediately
+        bus.setKeyState(8, 0x8000, true);
+    }
+
+    /** Process Shift+key state machine on emulation thread. */
+    private void processShiftCombos() {
+        if (shiftCombo < 0) return;
+
+        int col = shiftCombo >>> 16;
+        int cbit = shiftCombo & 0xFFFF;
+
+        if (shiftComboDelay > 0) {
+            shiftComboDelay--;
+            return;
+        }
+
+        if (shiftComboHold == 0) {
+            // Press the key
+            bus.setKeyState(col, cbit, true);
+            shiftComboHold = SHIFT_KEY_HOLD;
+            return;
+        }
+
+        shiftComboHold--;
+        if (shiftComboHold == 0) {
+            // Release key and Shift
+            bus.setKeyState(col, cbit, false);
+            if (!pcShiftHeld) {
+                bus.setKeyState(8, 0x8000, false);
             }
+            shiftCombo = -1;
         }
     }
 
@@ -573,9 +670,10 @@ public class SwingRenderer implements FrameBufferRenderer {
                 }
             }
 
-            // Fn+letter state machine (XT only) — all on emulation thread
+            // Fn+letter and Shift+key state machines — all on emulation thread
+            processFnCombos();
             if (config.type == MachineConfig.MachineType.XT) {
-                processFnLetters();
+                processShiftCombos();
             }
 
             // Keyboard probe: auto-release after hold expires
