@@ -339,6 +339,7 @@ public class CybikoEmulator {
                 bus.tickDtcCompletion();
                 bus.tickSci0();
                 bus.tickSci2();
+                bus.tickSerial();
                 totalSteps++;
 
                 if (hasLimit && totalSteps >= maxStepsLimit) break;
@@ -439,6 +440,23 @@ public class CybikoEmulator {
                 } else {
                     bus.getSci2RegLog().clear();
                 }
+                // Serial port hex dump
+                if (!bus.getSerialTxLog().isEmpty()) {
+                    if (Log.isEnabled(Log.Category.SERIAL)) {
+                        StringBuilder hex = new StringBuilder("[SERIAL-TX] ");
+                        for (int b : bus.getSerialTxLog()) hex.append(String.format("%02X ", b));
+                        Log.log(Log.Category.SERIAL, hex.toString());
+                    }
+                    bus.getSerialTxLog().clear();
+                }
+                if (!bus.getSerialRxLog().isEmpty()) {
+                    if (Log.isEnabled(Log.Category.SERIAL)) {
+                        StringBuilder hex = new StringBuilder("[SERIAL-RX] ");
+                        for (int b : bus.getSerialRxLog()) hex.append(String.format("%02X ", b));
+                        Log.log(Log.Category.SERIAL, hex.toString());
+                    }
+                    bus.getSerialRxLog().clear();
+                }
             }
 
             // Precise frame rate limiting (if we have a display)
@@ -524,6 +542,7 @@ public class CybikoEmulator {
         int sdrPort = 19201;
         String loggingSpec = null;
         long maxSteps = 0; // 0 = unlimited
+        String serialArg = null;
         MachineConfig.MachineType machineType = MachineConfig.MachineType.XT;
 
         // Parse arguments
@@ -562,6 +581,7 @@ public class CybikoEmulator {
                 case "--radio-id" -> { if (i + 1 < args.length) radioDeviceId = Integer.parseInt(args[++i]); }
                 case "--sdr-host" -> { if (i + 1 < args.length) sdrHost = args[++i]; }
                 case "--sdr-port" -> { if (i + 1 < args.length) sdrPort = Integer.parseInt(args[++i]); }
+                case "--serial" -> { if (i + 1 < args.length) serialArg = args[++i]; }
                 case "--logging" -> { if (i + 1 < args.length) loggingSpec = args[++i]; }
                 case "--max-steps" -> { if (i + 1 < args.length) maxSteps = Long.parseLong(args[++i]); }
                 default -> {
@@ -694,6 +714,36 @@ public class CybikoEmulator {
                 }
             } catch (IOException e) {
                 System.err.println("Warning: Radio transport not available: " + e.getMessage());
+            }
+        }
+
+        // Serial port bridge (V1/V2 only)
+        if (serialArg != null) {
+            if (config.type == MachineConfig.MachineType.XT) {
+                System.err.println("ERROR: --serial not supported on XT (SCI2 used for radio)");
+                System.exit(1);
+            }
+            try {
+                PtySerialPort serialPort;
+                if ("auto".equalsIgnoreCase(serialArg)) {
+                    serialPort = PtySerialPort.createAuto();
+                } else {
+                    serialPort = PtySerialPort.createExplicit(serialArg);
+                }
+                emu.getBus().setSerialPort(serialPort);
+                Runtime.getRuntime().addShutdownHook(new Thread(serialPort::close));
+
+                Log.log(Log.Category.SERIAL, "[SERIAL] PTY bridge active");
+                Log.log(Log.Category.SERIAL, "[SERIAL] Slave PTY: %s", serialPort.getPath());
+                Log.log(Log.Category.SERIAL, "[SERIAL] To connect Wine: ln -s %s ~/.wine/dosdevices/com1",
+                        serialPort.getPath());
+                Log.log(Log.Category.SERIAL, "[SERIAL] To connect minicom: minicom -D %s -b 57600",
+                        serialPort.getPath());
+                // Also print to stderr so it's visible even without --logging serial
+                System.err.println("[SERIAL] Slave PTY: " + serialPort.getPath());
+            } catch (java.io.IOException e) {
+                System.err.println("ERROR: Failed to create serial port: " + e.getMessage());
+                System.exit(1);
             }
         }
 
