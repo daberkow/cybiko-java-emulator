@@ -22,7 +22,7 @@ Learning project intended for eventual port to C.
 | `--machine v1\|v2\|xt` | Select machine type (default: `xt`) |
 | `--headless` | Run without GUI window |
 | `--trace` | Enable instruction tracing (slow, verbose) |
-| `--logging <cats>` | Log categories: cpu,radio,rtc,dma,io,status,boot,cfs,speaker,all,none (default: boot,status) |
+| `--logging <cats>` | Log categories: cpu,radio,rtc,dma,io,status,boot,cfs,speaker,serial,all,none (default: boot,status) |
 | `--mute` | Disable audio output |
 | `--nvram <file>` | Load/save persistent NVRAM (CFS filesystem + CyOS state) |
 | `--app <file.app>` | Add .app file to NVRAM before booting (multiple allowed) |
@@ -31,6 +31,7 @@ Learning project intended for eventual port to C.
 | `--radio-id <n>` | Set radio device ID (default: random) |
 | `--sdr-host <ip>` | SDR bridge host (default: localhost) |
 | `--sdr-port <port>` | SDR bridge port (default: 19201) |
+| `--serial <auto\|path>` | Serial PTY bridge for V1/V2 (auto=socat pair, or explicit PTY path) |
 
 ### NVRAM & App Loading
 ```bash
