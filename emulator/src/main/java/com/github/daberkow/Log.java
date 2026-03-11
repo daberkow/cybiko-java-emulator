@@ -22,7 +22,8 @@ public final class Log {
         IO,       // Unmapped I/O fallthrough
         BOOT,     // Startup milestones, ROM loading
         CFS,      // Filesystem operations
-        SPEAKER;  // Audio initialization
+        SPEAKER,  // Audio initialization
+        SERIAL;   // Serial port PTY bridge I/O
 
         /** Parse comma-separated category names (case-insensitive). */
         static Set<Category> parse(String spec) {
