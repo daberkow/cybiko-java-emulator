@@ -1,4 +1,4 @@
-# Phase 1: Virtual Serial Port (PTY Bridge) — Design
+# Serial PTY Bridge Design — DONE
 
 ## Goal
 

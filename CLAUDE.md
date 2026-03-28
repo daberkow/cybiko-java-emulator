@@ -361,7 +361,7 @@ V2 currently stalls at phase 3 (Cybiko logo). The desktop app never starts becau
 RF hardware init never completes. Service stub resolves non-RF set_task_state calls.
 
 ## Bugs Found & Fixed
-Full details in [docs/bugs-fixed.md](docs/bugs-fixed.md). Key lessons for future development:
+Full details in [docs/research/bugs-fixed.md](docs/research/bugs-fixed.md). Key lessons for future development:
 
 ### H8S Port Register Addresses
 Two register ranges for port I/O (from MAME h8s2319.cpp):
@@ -395,7 +395,7 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   missing keys: `!` (col 9, 0x0004), `,` (col 0, 0x0400), `(` (col 2, 0x0400),
   `)` (col 0, 0x0200). Full Fn+letter symbol layer and Shift+key combos mapped.
   Only unmapped: backtick (no Cybiko equivalent), Cybiko ☆ symbol (Fn+C, no PC key).
-  See [docs/xt-keyboard.md](docs/xt-keyboard.md) for complete matrix and PC mapping.
+  See [docs/research/xt-keyboard.md](docs/research/xt-keyboard.md) for complete matrix and PC mapping.
 - **V1 Fn+' for " not working**: Shift+' on PC should produce " via Fn+' on V1 Cybiko.
   The Fn combo queue (same as XT) doesn't produce results. V1 CyOS may use a different
   mechanism for the Fn layer, or different timing. Needs investigation (low priority).
@@ -440,14 +440,14 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
   capture — frames received via UDP between TX DTC cycles are delivered without
   waiting for the next poll/scan. Nearby peer discovery and Chat messaging
   between emulators confirmed working.
-  See [docs/rf2915-research.md](docs/rf2915-research.md) for decoded frame format.
+  See [docs/research/rf2915-research.md](docs/research/rf2915-research.md) for decoded frame format.
 
 ## Current Status
 - Multi-machine support: V1 (Classic), V2, and XT (Xtreme) selectable via --machine flag
 - CyOS fully boots to interactive "Congratulations!" welcome screen (or desktop with NVRAM) on XT
 - V1 CyOS fully boots from SPI flash (AT45DB041 + DTC bulk transfer) to interactive UI
 - Keyboard fully mapped on XT: letters, arrows, F1-F7, all punctuation/symbols via
-  lazy Shift + Fn combo queue + Shift combo queue. See docs/xt-keyboard.md.
+  lazy Shift + Fn combo queue + Shift combo queue. See docs/research/xt-keyboard.md.
 - Keyboard works on V1: letters, arrows, numbers, most punctuation. Fn+' for " not working.
 - Minimum key hold time (3 frames) prevents fast key presses from being missed
 - RTC shows correct date/time on all variants (PCF8593 I2C, real-time advancement)
@@ -475,7 +475,7 @@ Two register ranges for port I/O (from MAME h8s2319.cpp):
 - Async frame delivery: tickSci2() injects indicator when CyOS state==1 (idle), every 512 cycles
 - Received frame queue cap: 4 (handles CyOS 3x retransmit bursts)
 - UDP wait in completeTxDtc(): 15ms (simulates RF round-trip for synchronous path)
-- CyOS radio frame format partially decoded (see docs/rf2915-research.md)
+- CyOS radio frame format partially decoded (see docs/research/rf2915-research.md)
 - Nearby peer discovery works on home screen (beacons delivered during polls)
 - Chat messaging between emulators confirmed working
 - LAN radio networking via UDP multicast (--radio lan)
@@ -742,7 +742,7 @@ AND/OR/XOR, shifts/rotates, branches, JSR/BSR/RTS, bit operations (BSET/BCLR/BTS
 including memory-addressed variants like `BSET #n, @aa:32`), STM/LDM, EXTU/EXTS, MULXU/DIVXU.
 
 ## V2 Status
-Full investigation in [docs/v2-investigation.md](docs/v2-investigation.md).
+Full investigation in [docs/research/v2-investigation.md](docs/research/v2-investigation.md).
 
 V2 boots to animated Cybiko logo but stalls — desktop app never starts because RF
 hardware init (RF2915) never completes. The service stub auto-resolves non-RF

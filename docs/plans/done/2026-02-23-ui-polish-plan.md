@@ -1,4 +1,4 @@
-# UI Polish Implementation Plan
+# UI Polish Implementation Plan — DONE
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 

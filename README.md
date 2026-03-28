@@ -2,8 +2,8 @@
 
 A standalone Java emulator for the [Cybiko](https://en.wikipedia.org/wiki/Cybiko) handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by Tim Schuerewegen.
 
-![Emulator](./docs/twoemulatorhome.png)
-![Manager](./docs/manager.png)
+![Emulator](./docs/images/twoemulatorhome.png)
+![Manager](./docs/images/manager.png)
 
 ## Quick Start
 
@@ -211,10 +211,13 @@ cd cybiko-java-emulator
 
 ## Documentation
 
-- [Bugs Fixed](docs/bugs-fixed.md) - Detailed log of emulation bugs found and fixed
-- [Wireless Protocol](docs/wireless-protocol.md) - Cybiko radio protocol analysis
-- [RF2915 Research](docs/rf2915-research.md) - RF2915 transceiver and frame format research
-- [V2 Investigation](docs/v2-investigation.md) - V2 CyOS boot stall investigation
+- [Bugs Fixed](docs/research/bugs-fixed.md) - Detailed log of emulation bugs found and fixed
+- [Wireless Protocol](docs/research/wireless-protocol.md) - Cybiko radio protocol analysis
+- [RF2915 Research](docs/research/rf2915-research.md) - RF2915 transceiver and frame format research
+- [V2 Investigation](docs/research/v2-investigation.md) - V2 CyOS boot stall investigation
+- [XT Keyboard](docs/research/xt-keyboard.md) - Complete keyboard matrix mapping
+- [App Format](docs/research/app-format.md) - Cybiko .app archive and compression format
+- [Serial Device Connection](docs/research/serial-device-connection.md) - Serial PTY bridge for external tools
 
 ## Links
 
