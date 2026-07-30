@@ -2,6 +2,9 @@
 
 A standalone Java emulator for the [Cybiko](https://en.wikipedia.org/wiki/Cybiko) handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by the fantastic Tim Schuerewegen!
 
+![Emulator](./docs/images/twoemulatorhome.png)
+![Manager](./docs/images/manager.png)
+
 I always loved this device, and wanted to play around with a stand alone emulator to try to port it to a ESP32, and work with real devices using software defined radio. I did use Claude for a lot of it, and
 I know people have opinions on AI. This was a project I wanted to do for a while, and never had time for. Claude got it all working, without it the project would not exist.
 
@@ -27,8 +30,7 @@ Please report issues or feature ideas on the [Issues tab](https://github.com/dab
 - **MP3** playback is not implemented on any variant. Sound is 1-bit PWM only.
 - **RTC** shows correct date and time on all variants via I2C (PCF8593). Time advances in real-time during emulation.
 
-![Emulator](./docs/images/twoemulatorhome.png)
-![Manager](./docs/images/manager.png)
+
 
 ## Quick Start
 
