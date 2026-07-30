@@ -54,7 +54,7 @@ jobs:
              "manager/build/libs/Cybiko-NVRAM-Manager-${MGR_FULL}.jar"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "Cybiko Emulator ${{ steps.version.outputs.tag }}"
