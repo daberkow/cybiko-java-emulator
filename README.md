@@ -5,6 +5,28 @@ A standalone Java emulator for the [Cybiko](https://en.wikipedia.org/wiki/Cybiko
 I always loved this device, and wanted to play around with a stand alone emulator to try to port it to a ESP32, and work with real devices using software defined radio. I did use Claude for a lot of it, and
 I know people have opinions on AI. This was a project I wanted to do for a while, and never had time for. Claude got it all working, without it the project would not exist.
 
+This is the main repo for me working on this project. A few others have been made for a [C Version](https://github.com/daberkow/cybiko-c-emulator) and a port to the [LilyGo T-Deck](https://github.com/daberkow/cybiko-lilygo). Java is my best known language, thus I started here to be able to debug.
+
+Please report issues or feature ideas on the [Issues tab](https://github.com/daberkow/cybiko-java-emulator/issues).
+
+## Current Functionality
+
+| Feature | Classic V1 | V2 | Xtreme |
+|---------|:----------:|:--:|:------:|
+| Core (boot to interactive UI) | Yes | Yes (CyOS v1.3.57) | Yes |
+| Sound (1-bit PWM speaker) | Yes | Yes | Yes |
+| MP3 Player | No | No | No |
+| Radio (LAN/SDR networking) | Yes | Partial | Yes |
+| RTC (real-time clock) | Yes | Yes | Yes |
+| App Loading (CFS + NVRAM) | Yes | Yes | Yes |
+| Keyboard | Yes | Yes | Yes |
+| DMA | N/A | N/A | Yes |
+
+**Notes:**
+- **V2** fully boots with CyOS v1.3.57. CyOS v1.3.58 stalls at the animated logo (RF hardware init never completes, same as MAME).
+- **MP3** playback is not implemented on any variant. Sound is 1-bit PWM only.
+- **RTC** shows correct date and time on all variants via I2C (PCF8593). Time advances in real-time during emulation.
+
 ![Emulator](./docs/images/twoemulatorhome.png)
 ![Manager](./docs/images/manager.png)
 
@@ -79,33 +101,8 @@ Letters map directly to your keyboard. Arrow keys for navigation, Enter/Space/Ta
 
 ---
 
-## About
 
-This project was something I was interested in, and I wanted to test out Claude Code. After getting the base emulator working, I went about adding new features like a manager to manage the games, and working on wireless communications.
-
-This is the main repo for me working on this project. A few others have been made for a [C Version](https://github.com/daberkow/cybiko-c-emulator) and a port to the [LilyGo T-Deck](https://github.com/daberkow/cybiko-lilygo). Java is my best known language, thus I started here to be able to debug.
-
-Please report issues or feature ideas on the [Issues tab](https://github.com/daberkow/cybiko-java-emulator/issues).
-
-## Current Functionality
-
-| Feature | Classic V1 | V2 | Xtreme |
-|---------|:----------:|:--:|:------:|
-| Core (boot to interactive UI) | Yes | Yes (CyOS v1.3.57) | Yes |
-| Sound (1-bit PWM speaker) | Yes | Yes | Yes |
-| MP3 Player | No | No | No |
-| Radio (LAN/SDR networking) | Yes | Partial | Yes |
-| RTC (real-time clock) | Yes | Yes | Yes |
-| App Loading (CFS + NVRAM) | Yes | Yes | Yes |
-| Keyboard | Yes | Yes | Yes |
-| DMA | N/A | N/A | Yes |
-
-**Notes:**
-- **V2** fully boots with CyOS v1.3.57. CyOS v1.3.58 stalls at the animated logo (RF hardware init never completes, same as MAME).
-- **MP3** playback is not implemented on any variant. Sound is 1-bit PWM only.
-- **RTC** shows correct date and time on all variants via I2C (PCF8593). Time advances in real-time during emulation.
-
-### Radio Networking
+## Radio Networking
 
 Radio supports UDP multicast (`--radio lan`) for LAN play and a TCP bridge (`--radio sdr`) for GNU Radio integration.
 
