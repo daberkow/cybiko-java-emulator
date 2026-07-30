@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Java / Gradle dependencies.
+  # Covers the root version catalog (gradle/libs.versions.toml) plus the
+  # inline plugin versions declared in each subproject's build.gradle.
+  - package-ecosystem: "gradle"
+    directories:
+      - "/"
+      - "/emulator"
+      - "/manager"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      # Batch routine minor/patch bumps into a single PR to cut noise;
+      # major bumps still get their own PRs so they can be reviewed carefully.
+      gradle-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions used by the CI and release workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        update-types:
+          - "minor"
+          - "patch"

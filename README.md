@@ -1,6 +1,9 @@
 # Cybiko Emulator & NVRAM Manager
 
-A standalone Java emulator for the [Cybiko](https://en.wikipedia.org/wiki/Cybiko) handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by Tim Schuerewegen.
+A standalone Java emulator for the [Cybiko](https://en.wikipedia.org/wiki/Cybiko) handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by the fantastic Tim Schuerewegen!
+
+I always loved this device, and wanted to play around with a stand alone emulator to try to port it to a ESP32, and work with real devices using software defined radio. I did use Claude for a lot of it, and
+I know people have opinions on AI. This was a project I wanted to do for a while, and never had time for. Claude got it all working, without it the project would not exist.
 
 ![Emulator](./docs/images/twoemulatorhome.png)
 ![Manager](./docs/images/manager.png)
@@ -19,7 +22,7 @@ You need two ROM files per machine variant. These come from MAME ROM sets:
 | Cybiko Classic V1 | `cyrom112.bin` + `flash_v1246.bin` | `cybiko.zip` |
 | Cybiko V2 | `cyrom117.bin` + `cyos_v1357.bin` + `flash_v1357.bin` | `cybikov2.zip` |
 
-ROMs can be found at the [Cybiko Archive on archive.org](https://archive.org/details/cybiko) or in MAME ROM collections.
+ROMs can be found at the [Cybiko Archive on archive.org](https://archive.org/details/cybiko) or in [MAME ROM collections](https://ia803204.us.archive.org/view_archive.php?archive=/29/items/mame-0.221-roms-merged/cybikov1.zip).
 
 ### 2. Download and Run
 
@@ -27,13 +30,16 @@ Grab the latest `.jar` from the [Releases page](https://github.com/daberkow/cybi
 
 ```bash
 # Cybiko Xtreme (default)
-java -jar Cybiko-Emulator-*.jar cyrom150.bin cyos_v1508.bin
+java -jar Cybiko-Emulator-*.jar cyrom150.bin cyos_v1508.bin --nvram localmemory.bin
 
 # Cybiko Classic V1
-java -jar Cybiko-Emulator-*.jar --machine v1 cyrom112.bin flash_v1246.bin
+java -jar Cybiko-Emulator-*.jar --machine v1 cyrom112.bin flash_v1246.bin --nvram localmemory.bin
 
 # Cybiko V2
-java -jar Cybiko-Emulator-*.jar --machine v2 cyrom117.bin cyos_v1357.bin flash_v1357.bin
+java -jar Cybiko-Emulator-*.jar --machine v2 cyrom117.bin cyos_v1357.bin flash_v1357.bin --nvram localmemory.bin
+
+# See Options
+java -jar Cybiko-Emulator-*.jar --help
 ```
 
 > A full distribution ZIP with launch scripts is also available on the releases page if you prefer that.

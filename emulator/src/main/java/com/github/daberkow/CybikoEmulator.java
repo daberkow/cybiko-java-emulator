@@ -506,28 +506,40 @@ public class CybikoEmulator {
     public Thread getEmulatorThread() { return emulatorThread; }
 
     // --- Main entry point ---
+    private static void printUsage() {
+        System.out.println("Usage: cybiko-java [--machine v1|v2|xt] <boot_rom.bin> [flash_rom.bin] [dataflash.bin] [options]");
+        System.out.println();
+        System.out.println("  --machine <type>  - Machine type: v1 (Classic), v2, xt (Xtreme, default)");
+        System.out.println("  boot_rom.bin      - 32KB boot ROM");
+        System.out.println("  flash_rom.bin     - Flash ROM (memory-mapped for V2/XT, SPI for V1)");
+        System.out.println("  dataflash.bin     - SPI dataflash (V2 only, 3rd positional arg or --dataflash)");
+        System.out.println("  --dataflash <file> - SPI dataflash file (AT45DB041, V2 only)");
+        System.out.println("  --headless        - Run without GUI window");
+        System.out.println("  --trace           - Enable instruction tracing");
+        System.out.println("  --nvram <file>    - Load/save NVRAM (persistent RAM with CFS filesystem)");
+        System.out.println("  --app <file>      - Add .app to NVRAM before booting");
+        System.out.println("  --list-apps       - List apps in NVRAM and exit");
+        System.out.println("  --mute            - Disable audio output");
+        System.out.println("  --remote-display <port> - Enable remote display TCP server on port");
+        System.out.println("  --radio <lan|sdr>  - Enable radio (lan=UDP multicast, sdr=TCP bridge)");
+        System.out.println("  --radio-id <n>     - Set radio device ID (default: random)");
+        System.out.println("  --sdr-host <ip>    - SDR bridge host (default: localhost)");
+        System.out.println("  --sdr-port <port>  - SDR bridge port (default: 19201)");
+        System.out.println("  --serial <auto|path> - Serial PTY bridge for V1/V2 (auto=socat pair, or PTY path)");
+        System.out.println("  --logging <cats>   - Log categories: all,none,status,cpu,radio,rtc,dma,io,boot,cfs,speaker");
+        System.out.println("  --max-steps <n>    - Stop after N CPU steps (default: unlimited)");
+        System.out.println("  --help, -h         - Show this help and exit");
+    }
+
     public static void main(String[] args) {
+        for (String arg : args) {
+            if (arg.equals("--help") || arg.equals("-h")) {
+                printUsage();
+                System.exit(0);
+            }
+        }
         if (args.length < 1) {
-            System.out.println("Usage: cybiko-java [--machine v1|v2|xt] <boot_rom.bin> [flash_rom.bin] [dataflash.bin] [options]");
-            System.out.println();
-            System.out.println("  --machine <type>  - Machine type: v1 (Classic), v2, xt (Xtreme, default)");
-            System.out.println("  boot_rom.bin      - 32KB boot ROM");
-            System.out.println("  flash_rom.bin     - Flash ROM (memory-mapped for V2/XT, SPI for V1)");
-            System.out.println("  dataflash.bin     - SPI dataflash (V2 only, 3rd positional arg or --dataflash)");
-            System.out.println("  --dataflash <file> - SPI dataflash file (AT45DB041, V2 only)");
-            System.out.println("  --headless        - Run without GUI window");
-            System.out.println("  --trace           - Enable instruction tracing");
-            System.out.println("  --nvram <file>    - Load/save NVRAM (persistent RAM with CFS filesystem)");
-            System.out.println("  --app <file>      - Add .app to NVRAM before booting");
-            System.out.println("  --list-apps       - List apps in NVRAM and exit");
-            System.out.println("  --mute            - Disable audio output");
-            System.out.println("  --remote-display <port> - Enable remote display TCP server on port");
-            System.out.println("  --radio <lan|sdr>  - Enable radio (lan=UDP multicast, sdr=TCP bridge)");
-            System.out.println("  --radio-id <n>     - Set radio device ID (default: random)");
-            System.out.println("  --sdr-host <ip>    - SDR bridge host (default: localhost)");
-            System.out.println("  --sdr-port <port>  - SDR bridge port (default: 19201)");
-            System.out.println("  --logging <cats>   - Log categories: all,none,status,cpu,radio,rtc,dma,io,boot,cfs,speaker");
-            System.out.println("  --max-steps <n>    - Stop after N CPU steps (default: unlimited)");
+            printUsage();
             System.exit(1);
         }
 
