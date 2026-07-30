@@ -2,6 +2,8 @@
 
 A standalone Java emulator for the [Cybiko](https://en.wikipedia.org/wiki/Cybiko) handheld computer family, plus a desktop NVRAM manager for working with Cybiko flash images. Derived from MAME's emulation by the fantastic Tim Schuerewegen!
 
+Blog post about it: [https://buildingtents.com/2026/07/29/writing-a-cybiko-emulator/](https://buildingtents.com/2026/07/29/writing-a-cybiko-emulator/)
+
 ![Emulator](./docs/images/twoemulatorhome.png)
 ![Manager](./docs/images/manager.png)
 
