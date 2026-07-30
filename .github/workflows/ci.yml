@@ -27,7 +27,7 @@ jobs:
 
       - name: Upload emulator artifacts
         if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cybiko-java-dist
           path: emulator/build/distributions/*.zip
@@ -35,7 +35,7 @@ jobs:
 
       - name: Upload manager artifacts
         if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cybiko-manager-dist
           path: manager/build/distributions/*.zip
